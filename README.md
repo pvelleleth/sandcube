@@ -101,4 +101,8 @@ The create `command` must be a long-running environment process available in the
 
 ## Scope
 
-This implements Phases 1–3, not the full V1 service. Sandboxes have isolated network namespaces **without outbound connectivity**. CPU, memory and process limits are configured; disk quotas, aggregate VPS capacity checks, full sandbox metadata/reconciliation, streaming/TTY, durable process history, TTL and crash reconciliation are future work. Exec timeout kills the requested process; it does not yet provide a process-tree cancellation API. Do not expose this milestone as a public multi-tenant service.
+This implements Phases 1–4, not the full V1 service. Sandboxes have isolated network namespaces **without outbound connectivity**. CPU, memory and process limits are configured; disk quotas, aggregate VPS capacity checks and streaming/TTY remain future work. PostgreSQL enables durable sandbox metadata, lifecycle reconciliation, idempotency and TTL; the adapter preserves process history and logs across restarts. Exec timeout kills the requested process; it does not yet provide a process-tree cancellation API. Do not expose this milestone as a public multi-tenant service.
+
+## Phase 4 reliability
+
+[Durable recovery, idempotency, TTL and metrics](docs/reliability.md) are enabled with `DATABASE_URL`. Process history and bounded stdout/stderr capture survive API/adapter crashes. Run `make integration-reliability` with a dedicated `TEST_DATABASE_URL` and test runtime to exercise real SIGKILL recovery.

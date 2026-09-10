@@ -11,15 +11,20 @@ import (
 	"syscall"
 	"time"
 
+	"crypto/sha256"
+	"encoding/json"
 	"github.com/containerd/containerd/api/services/tasks/v1"
 	runtimeoptions "github.com/containerd/containerd/api/types/runtimeoptions/v1"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/errdefs"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"os"
+	"path/filepath"
 )
 
 const runtimeName = "io.containerd.runsc.v1"
@@ -39,10 +44,11 @@ type Sandbox struct {
 	Snapshot string `json:"snapshot_key"`
 }
 type ExecRequest struct {
-	Command []string          `json:"command"`
-	Cwd     string            `json:"cwd"`
-	Env     map[string]string `json:"env"`
-	Timeout int               `json:"timeout_seconds"`
+	RequestID string            `json:"request_id,omitempty"`
+	Command   []string          `json:"command"`
+	Cwd       string            `json:"cwd"`
+	Env       map[string]string `json:"env"`
+	Timeout   int               `json:"timeout_seconds"`
 }
 type ExecResult struct {
 	Stdout    string `json:"stdout"`
@@ -61,14 +67,15 @@ type Backend interface {
 	Exec(context.Context, string, ExecRequest) (ExecResult, error)
 }
 type Runtime struct {
-	client     *containerd.Client
-	namespace  string
-	configPath string
-	buildRoot  string
-	stateRoot  string
-	imageMu    sync.Mutex
-	processMu  sync.Mutex
-	processes  map[string]*trackedProcess
+	client      *containerd.Client
+	namespace   string
+	configPath  string
+	buildRoot   string
+	stateRoot   string
+	historyRoot string
+	imageMu     sync.Mutex
+	processMu   sync.Mutex
+	processes   map[string]*trackedProcess
 }
 
 func (r *Runtime) ctx(ctx context.Context) context.Context {
@@ -96,6 +103,34 @@ func (r *Runtime) Create(ctx context.Context, cfg Config) (Sandbox, error) {
 	r.imageMu.Lock()
 	defer r.imageMu.Unlock()
 	ctx = r.ctx(ctx)
+	encoded, _ := json.Marshal(cfg)
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256(encoded))
+	if existing, e := r.load(ctx, cfg.ID); e == nil {
+		info, e := existing.Info(ctx)
+		if e != nil {
+			return Sandbox{}, e
+		}
+		if info.Labels["sandcube.config"] != fingerprint {
+			return Sandbox{}, errdefs.ErrAlreadyExists
+		}
+		return r.describe(ctx, existing)
+	} else if !errdefs.IsNotFound(e) {
+		return Sandbox{}, e
+	}
+	// An ID collision with an unmanaged container is not an orphan snapshot.
+	if _, e := r.client.LoadContainer(ctx, cfg.ID); e == nil {
+		return Sandbox{}, errdefs.ErrAlreadyExists
+	} else if !errdefs.IsNotFound(e) {
+		return Sandbox{}, e
+	}
+	// Recover a labelled snapshot left between snapshot prepare and container commit.
+	if info, e := r.client.SnapshotService("overlayfs").Stat(ctx, cfg.ID); e == nil && info.Labels[ownerLabel] == "true" {
+		if e = r.client.SnapshotService("overlayfs").Remove(ctx, cfg.ID); e != nil {
+			return Sandbox{}, e
+		}
+	} else if e != nil && !errdefs.IsNotFound(e) {
+		return Sandbox{}, e
+	}
 	img, err := r.client.GetImage(ctx, cfg.Image)
 	if err != nil {
 		return Sandbox{}, err
@@ -105,9 +140,9 @@ func (r *Runtime) Create(ctx context.Context, cfg Config) (Sandbox, error) {
 	_, err = r.client.NewContainer(ctx, cfg.ID,
 		containerd.WithImage(img), containerd.WithSnapshotter("overlayfs"),
 		containerd.WithRuntime(runtimeName, &runtimeoptions.Options{ConfigPath: r.configPath}),
-		containerd.WithContainerLabels(map[string]string{ownerLabel: "true"}),
+		containerd.WithContainerLabels(map[string]string{ownerLabel: "true", "sandcube.config": fingerprint}),
 		func(ctx context.Context, client *containerd.Client, c *containers.Container) error {
-			err := containerd.WithNewSnapshot(cfg.ID, img)(ctx, client, c)
+			err := containerd.WithNewSnapshot(cfg.ID, img, snapshots.WithLabels(map[string]string{ownerLabel: "true"}))(ctx, client, c)
 			snapshotCreated = err == nil
 			return err
 		},
@@ -210,6 +245,24 @@ func (r *Runtime) Stop(ctx context.Context, id string) (Sandbox, error) {
 	if err != nil {
 		return Sandbox{}, err
 	}
+	r.processMu.Lock()
+	ps := []*trackedProcess{}
+	for _, p := range r.processes {
+		if p.info.SandboxID == id {
+			ps = append(ps, p)
+		}
+	}
+	r.processMu.Unlock()
+	for _, p := range ps {
+		if p.snapshot().Status == "running" {
+			if e := p.proc.Kill(ctx, syscall.SIGKILL); e != nil && !errdefs.IsNotFound(e) {
+				return Sandbox{}, e
+			}
+		}
+	}
+	if err = r.settleProcesses(ctx, id); err != nil {
+		return Sandbox{}, err
+	}
 	// Delete only the task. The container and its writable snapshot are retained.
 	if err = r.deleteTask(ctx, t); err != nil {
 		return Sandbox{}, err
@@ -250,7 +303,22 @@ func (r *Runtime) Delete(ctx context.Context, id string) error {
 	ctx = r.ctx(ctx)
 	c, err := r.load(ctx, id)
 	if errdefs.IsNotFound(err) {
-		return nil
+		if _, e := r.client.LoadContainer(ctx, id); e == nil {
+			return errdefs.ErrNotFound
+		} else if !errdefs.IsNotFound(e) {
+			return e
+		}
+		if info, e := r.client.SnapshotService("overlayfs").Stat(ctx, id); e == nil && info.Labels[ownerLabel] == "true" {
+			if e = r.client.SnapshotService("overlayfs").Remove(ctx, id); e != nil && !errdefs.IsNotFound(e) {
+				return e
+			}
+		} else if e != nil && !errdefs.IsNotFound(e) {
+			return e
+		}
+		if err = r.settleProcesses(ctx, id); err != nil {
+			return err
+		}
+		return r.forgetProcesses(id)
 	}
 	if err != nil {
 		return err
@@ -261,8 +329,7 @@ func (r *Runtime) Delete(ctx context.Context, id string) error {
 	if err = c.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
 		return err
 	}
-	r.forgetProcesses(id)
-	return nil
+	return r.forgetProcesses(id)
 }
 
 // Cap captured output while continuing to drain pipes, avoiding deadlocks and unbounded memory.
@@ -290,87 +357,69 @@ func (b *limitedBuffer) result() (string, bool) {
 	return b.b.String(), b.truncated
 }
 func (r *Runtime) Exec(ctx context.Context, id string, req ExecRequest) (ExecResult, error) {
-	ctx = r.ctx(ctx)
-	c, err := r.load(ctx, id)
+	wait, err := r.PrepareExec(ctx, id, req)
 	if err != nil {
 		return ExecResult{}, err
 	}
-	t, err := c.Task(ctx, nil)
-	if errdefs.IsNotFound(err) {
-		return ExecResult{}, errdefs.ErrFailedPrecondition
-	}
+	return wait()
+}
+func (r *Runtime) PrepareExec(ctx context.Context, id string, req ExecRequest) (func() (ExecResult, error), error) {
+	info, err := r.StartProcess(ctx, id, req)
 	if err != nil {
-		return ExecResult{}, err
+		return nil, err
 	}
-	s, err := c.Spec(ctx)
+	p, err := r.lookupProcess(id, info.ID)
 	if err != nil {
-		return ExecResult{}, err
+		return nil, err
 	}
-	p := *s.Process
-	p.Args = req.Command
-	p.Terminal = false
-	if req.Cwd != "" {
-		p.Cwd = req.Cwd
-	}
-	p.Env = mergeEnv(p.Env, req.Env)
-	var out, stderr limitedBuffer
-	proc, err := t.Exec(ctx, fmt.Sprintf("exec-%d", time.Now().UnixNano()), &p, cio.NewCreator(cio.WithStreams(nil, &out, &stderr)))
-	if err != nil {
-		return ExecResult{}, err
-	}
-	defer func() {
-		clean, cancel := context.WithTimeout(r.ctx(context.Background()), 10*time.Second)
-		defer cancel()
-		status, statusErr := proc.Status(clean)
-		if statusErr == nil {
-			if status.Status == containerd.Running {
-				_, _ = proc.Delete(clean, containerd.WithProcessKill)
-			} else {
-				_, _ = proc.Delete(clean)
-			}
-		}
-	}()
-	wait, err := proc.Wait(ctx)
-	if err != nil {
-		return ExecResult{}, err
-	}
-	if err = proc.Start(ctx); err != nil {
-		return ExecResult{}, err
-	}
+	return func() (ExecResult, error) { return r.waitExec(ctx, id, req, p) }, nil
+}
+func (r *Runtime) waitExec(ctx context.Context, id string, req ExecRequest, p *trackedProcess) (ExecResult, error) {
+	info := p.snapshot()
 	timer := time.NewTimer(time.Duration(req.Timeout) * time.Second)
 	defer timer.Stop()
 	result := ExecResult{}
-	var status containerd.ExitStatus
 	select {
-	case status = <-wait:
+	case <-p.done:
 	case <-timer.C:
 		result.TimedOut = true
-		if err = proc.Kill(ctx, syscall.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+		p.mu.Lock()
+		p.info.TimedOut = true
+		p.mu.Unlock()
+		_, err := r.KillProcess(ctx, id, info.ID)
+		if err != nil {
 			return result, err
-		}
-		select {
-		case status = <-wait:
-		case <-time.After(10 * time.Second):
-			return result, errors.New("timed out waiting for killed process")
-		case <-ctx.Done():
-			return result, ctx.Err()
 		}
 	case <-ctx.Done():
 		return result, ctx.Err()
 	}
-	code, _, err := status.Result()
-	if err != nil {
-		return result, err
+	info = p.snapshot()
+	result.TimedOut = result.TimedOut || info.TimedOut
+	if info.ExitCode == nil {
+		return result, errors.New(info.Error)
 	}
-	result.ExitCode = code
-	// Delete waits for the IO copier to finish, so final output is included.
-	if _, err = proc.Delete(ctx); err != nil {
-		return result, err
+	result.ExitCode = *info.ExitCode
+	if r.historyRoot != "" {
+		dir := r.processDir(id, info.ID)
+		out, e := os.ReadFile(filepath.Join(dir, "stdout"))
+		if e != nil {
+			return result, e
+		}
+		stderr, e := os.ReadFile(filepath.Join(dir, "stderr"))
+		if e != nil {
+			return result, e
+		}
+		result.Stdout = string(out)
+		result.Stderr = string(stderr)
+		_, a := os.Stat(filepath.Join(dir, "stdout.truncated"))
+		_, b := os.Stat(filepath.Join(dir, "stderr.truncated"))
+		result.Truncated = a == nil || b == nil
+	} else {
+		var a, b bool
+		result.Stdout, a = p.out.result()
+		result.Stderr, b = p.stderr.result()
+		result.Truncated = a || b
 	}
-	var a, b bool
-	result.Stdout, a = out.result()
-	result.Stderr, b = stderr.result()
-	result.Truncated = a || b
 	return result, nil
 }
 

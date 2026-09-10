@@ -6,7 +6,7 @@ The Crystal API owns image state and build orchestration. `buildctl` builds a lo
 
 Install PostgreSQL, `shards`, and the official [BuildKit binaries](https://github.com/moby/buildkit/releases). Run `shards install` and `make build`. The API applies the additive, idempotent migration in `migrations/001_images.sql` when `DATABASE_URL` is configured. Use a database dedicated to this service.
 
-Run **one API instance per database/namespace**, using a private build directory shared with the runtime adapter. The API holds an exclusive lock on this directory. Run BuildKit separately with its private Unix socket, process isolation, and an isolated bridge/CNI network. Do not enable `security.insecure`, `network.host`, device entitlements, or `--oci-worker-no-process-sandbox`. Builds receive only their uploaded context and build arguments; registry credentials, SSH agents, secret mounts, and host environment variables are not forwarded.
+Run **one image-enabled API instance per database/namespace** (additional lifecycle-only instances set `SANDCUBE_IMAGE_API_ENABLED=false`), using a private build directory shared with the runtime adapter. The API holds an exclusive lock on this directory. Run BuildKit separately with its private Unix socket, process isolation, and an isolated bridge/CNI network. Do not enable `security.insecure`, `network.host`, device entitlements, or `--oci-worker-no-process-sandbox`. Builds receive only their uploaded context and build arguments; registry credentials, SSH agents, secret mounts, and host environment variables are not forwarded.
 
 For the bundled BuildKit release (v0.33.0), the following uses its built-in bridge networking and bundled `buildkit-cni-*` helpers (put the release's `bin` directory on PATH):
 

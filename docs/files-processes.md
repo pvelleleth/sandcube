@@ -46,7 +46,7 @@ Tracking and IO live in the private runtime adapter, independently of the client
 
 Cancellation targets the requested process, not its descendants; use an application's foreground executable (or shell `exec`) when cancelling that workload individually. Sandbox stop/delete terminates all descendants as well. Listing covers detached commands created through this API, not init, synchronous execs, or arbitrary forked descendants.
 
-Process history and logs are currently **in adapter memory**, bounded to 128 records across its namespace; further launches return a limit error until a sandbox with retained records is deleted. They survive client/API reconnects and sandbox stop/start, but not adapter restart. Adapter crash recovery, durable process history, and orphan reconciliation belong to Phase 4. Files remain persisted in containerd snapshots across both service restarts.
+Process history and logs are durable on disk and survive adapter restart. Each stream retains up to 1 MiB while collectors continue draining output; failed launches also remain in history. History is retained until sandbox deletion or TTL cleanup. See [Phase 4 reliability](reliability.md) for recovery, keyed process/exec retries and retention details. Files remain persisted in containerd snapshots across service restarts.
 
 ## Verification
 

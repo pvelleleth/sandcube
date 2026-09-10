@@ -65,7 +65,9 @@ def check_phase3(api, execute, base, token, sid, other, reconnect_api):
     # Failed launch must neither hang nor leave a tracked process behind.
     previous = api('GET', prefix + '/processes')
     api('POST', prefix + '/processes', {'command': ['/does-not-exist']}, expected=500)
-    assert api('GET', prefix + '/processes') == previous
+    history = api('GET', prefix + '/processes')
+    failures = [p for p in history if p['id'] not in {old['id'] for old in previous}]
+    assert len(failures) == 1 and failures[0]['status'] == 'error'
 
     # Upload a generic small application; each API call opens a fresh connection.
     file('PUT', '/phase3/app.sh', b'#!/bin/sh\necho ready; echo diagnostic >&2; echo artifact > /phase3/generated; exec sleep 600\n', mode='0755')

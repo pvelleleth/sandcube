@@ -5,17 +5,19 @@ require "log"
 require "./runtime/runtime"
 require "./images/builder"
 require "./files/api"
+require "./reliability"
 
 module Sandcube
   class Service
     MAX_BODY = 64 * 1024
     @lifecycle_locks = Array(Mutex).new(256) { Mutex.new }
 
-    def initialize(@runtime : Runtime, @api_key : String, @images : ImageManager? = nil, @image_store : ImageStore? = nil)
+    def initialize(@runtime : Runtime, @api_key : String, @images : ImageManager? = nil, @image_store : ImageStore? = nil, @reliability : Reliability? = nil)
       raise ArgumentError.new("SANDCUBE_API_KEY must contain at least 32 bytes") if @api_key.bytesize < 32
     end
 
     def call(context : HTTP::Server::Context)
+      started = Time.instant
       response = context.response
       response.content_type = "application/json"
       expected = "Bearer #{@api_key}"
@@ -25,7 +27,32 @@ module Sandcube
       end
       method = context.request.method
       path = context.request.path
+      if reliability = @reliability
+        if method == "GET" && path == "/metrics"
+          response.content_type = "text/plain; version=0.0.4"
+          response.print(reliability.metrics)
+          return
+        end
+        lifecycle = method == "POST" && path == "/v1/sandboxes"
+        if match = /^\/v1\/sandboxes\/sbx_[a-zA-Z0-9_-]{1,80}(?:\/(start|stop|restart))?$/.match(path)
+          valid_method = match[1]? ? method == "POST" : {"GET", "DELETE"}.includes?(method)
+          return error(context, 404, "NOT_FOUND", "Unknown route") unless valid_method
+          lifecycle = true
+        end
+        if lifecycle
+          value = if method == "GET"
+                    reliability.inspect(path.split('/')[3])
+                  else
+                    body = path == "/v1/sandboxes" ? read_body(context) : nil
+                    reliability.request(method, path, body, context.request.headers["Idempotency-Key"]?)
+                  end
+          response.status_code = 201 if method == "POST" && path == "/v1/sandboxes"
+          response.print(value.to_json)
+          return
+        end
+      end
       result = if method == "GET" && path == "/health"
+                 @reliability.try(&.health)
                  @runtime.request("GET", "/health")
                elsif method == "POST" && path == "/v1/images"
                  manager = @images || raise ImageError.new(503, "IMAGES_UNAVAILABLE", "Image building is not configured")
@@ -44,7 +71,7 @@ module Sandcube
                  return
                elsif match = /^\/v1\/sandboxes\/(sbx_[a-zA-Z0-9_-]{1,80})\/processes(?:\/(proc_[a-f0-9]{32})(?:\/(logs|kill))?)?$/.match(path)
                  suffix = path.sub("/v1/sandboxes/", "/containers/")
-                 body = method == "POST" && match[2]?.nil? ? read_body(context) : nil
+                 body = method == "POST" && match[2]?.nil? ? process_body(context, match[1]) : nil
                  value = @runtime.request(method, suffix, body)
                  response.status_code = 202 if method == "POST" && match[2]?.nil?
                  value
@@ -64,7 +91,7 @@ module Sandcube
                      @runtime.request("POST", "/containers/#{id}/stop")
                      @runtime.request("POST", "/containers/#{id}/start")
                    elsif method == "POST" && {"start", "stop", "exec"}.includes?(action)
-                     body = action == "exec" ? read_body(context) : nil
+                     body = action == "exec" ? process_body(context, id) : nil
                      @runtime.request("POST", "/containers/#{id}/#{action}", body)
                    else
                      raise ArgumentError.new("Unsupported sandbox operation")
@@ -87,8 +114,25 @@ module Sandcube
     rescue ex : JSON::ParseException | TypeCastError | ArgumentError | KeyError
       error(context, 400, "INVALID_REQUEST", ex.message || "Invalid request")
     rescue ex
-      Log.error(exception: ex) { "Sandbox request failed" }
+      STDOUT.puts({level: "error", event: "api.error", message: ex.message}.to_json)
       error(context, 503, "RUNTIME_UNAVAILABLE", "Runtime operation unavailable")
+    ensure
+      STDOUT.puts({time: Time.utc.to_rfc3339, event: "api.request", method: context.request.method,
+                   path: context.request.path, status: context.response.status_code,
+                   duration_ms: started.try { |time| (Time.instant - time).total_milliseconds }}.to_json)
+    end
+
+    private def process_body(context, id) : String
+      body = read_body(context)
+      input = JSON.parse(body).as_h
+      raise ArgumentError.new("request_id is internal") if input.has_key?("request_id")
+      if key = context.request.headers["Idempotency-Key"]?
+        raise ArgumentError.new("Invalid Idempotency-Key") if key.empty? || key.bytesize > 200
+        digest = Digest::SHA256.hexdigest("#{id}\n#{context.request.path}\n#{key}")
+        input["request_id"] = JSON::Any.new("proc_#{digest[0, 32]}")
+        return input.to_json
+      end
+      body
     end
 
     private def read_body(context) : String

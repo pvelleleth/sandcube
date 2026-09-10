@@ -39,7 +39,7 @@ A failed start never produces a normal process-exit event. Cleanup deletes non-r
 
 ## Scope of evidence
 
-The original checks above prove the first two milestones; Phase 3 coverage is recorded below. They do not certify the full V1 service: disk quotas, capacity accounting, outbound networking, streaming/TTY, durable process history, TTL and crash reconciliation remain outside these milestones. Timeout currently targets the requested process, not a process tree. No public endpoint was deployed.
+The original checks above prove the first two milestones; Phase 3 coverage is recorded below. They do not certify the full V1 service: disk quotas, capacity accounting, outbound networking and streaming/TTY remain outside these milestones. Phase 4 recovery and cleanup are covered by the separate suite described below. Timeout currently targets the requested process, not a process tree. No public endpoint was deployed.
 
 
 ## Phase 2 image acceptance
@@ -75,3 +75,24 @@ BuildKit and PostgreSQL are test prerequisites, not mocked in the acceptance sui
 The runtime acceptance harness now includes [Phase 3 checks and API limits](files-processes.md). It tests binary file transfer, executable uploads, live file replacement, oversized request rejection, traversal and symlink escapes, detached execution across API reconnect, captured logs and generated artifacts, concurrent exit codes, output bounds, cancellation, stopped file access, persistence, and stop/delete with active processes. Unit tests add concurrent symlink swapping, special-file rejection, hardlink-safe replacement, modes, and route validation.
 
 Verified on 2026-09-10: the build succeeded; Go tests passed with `-race` and `go vet` passed; Crystal reported 35 examples, zero failures/errors, and zero pending tests after running against `DATABASE_URL` with isolated test schemas. Schema cleanup was verified. The complete real containerd/gVisor runtime acceptance suite passed, including the executable upload → detached launch → public API restart/reconnect → logs/artifact retrieval → cancellation workflow. The test namespace had no remaining containers after cleanup.
+
+## Phase 4 reliability acceptance
+
+Verified on 2026-09-10 with a dedicated local PostgreSQL database and the real containerd/gVisor/BuildKit stack. `make test` passes: 49 Crystal examples, zero failures/errors/pending; Go tests pass with `-race`, and `go vet` passes. The existing runtime/file/process and Dockerfile/image acceptance suites also pass.
+
+The new `scripts/integration_reliability.py` suite passes these checks:
+
+- SIGKILL both API and adapter immediately before and after create/start/stop/delete runtime calls, with committed PostgreSQL intent and missing HTTP responses.
+- Restart on the stale Unix socket, reconcile, and safely replay the original idempotency key; conflicting reuse returns 409.
+- Concurrent identical creates through two API processes produce one sandbox.
+- Completed process history survives restart; processes that exit while both services are down retain their real exit codes and separate stdout/stderr output.
+- Live process recovery, including a journal record still marked `starting`, returns the same running process without launching it again.
+- Lost exec responses replay without repeating file-modifying command side effects.
+- Uploaded/generated files persist across API/adapter crashes and stop/start.
+- Running and stopped TTL expiry removes sandbox resources while preserving reusable images.
+- Unknown managed containers and labelled orphan snapshots are removed; unlabelled snapshots remain.
+- Authenticated metrics include real CPU/memory/snapshot usage and cleanup outcomes.
+
+Database fault tests additionally cover failed create compensation and error replay, restart's durable stop/start boundary, cleanup failure with retained image reservations, inventory outages, missing containers, and key conflicts. Go tests cover atomic history recovery, corrupt metadata rejection, bounded stdout/stderr capture, orphan setup-directory cleanup, and retrying runtime process-record deletion while retaining history.
+
+The test namespace was left with no containers or sandbox snapshots; reusable base image content remains. All isolated PostgreSQL spec schemas were removed. See [reliability operations and limits](reliability.md) for deployment configuration, retention, and the distinction between adapter crashes and host/shim failure.
