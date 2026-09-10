@@ -4,6 +4,7 @@ require "crypto/subtle"
 require "log"
 require "./runtime/runtime"
 require "./images/builder"
+require "./files/api"
 
 module Sandcube
   class Service
@@ -38,6 +39,15 @@ module Sandcube
                  when "DELETE" then manager.delete(match[1])
                  else               return error(context, 404, "NOT_FOUND", "Unknown route")
                  end
+               elsif match = /^\/v1\/sandboxes\/(sbx_[a-zA-Z0-9_-]{1,80})\/files(\/content)?$/.match(path)
+                 Files.call(@runtime, context, match[1], !match[2]?.nil?)
+                 return
+               elsif match = /^\/v1\/sandboxes\/(sbx_[a-zA-Z0-9_-]{1,80})\/processes(?:\/(proc_[a-f0-9]{32})(?:\/(logs|kill))?)?$/.match(path)
+                 suffix = path.sub("/v1/sandboxes/", "/containers/")
+                 body = method == "POST" && match[2]?.nil? ? read_body(context) : nil
+                 value = @runtime.request(method, suffix, body)
+                 response.status_code = 202 if method == "POST" && match[2]?.nil?
+                 value
                elsif method == "POST" && path == "/v1/sandboxes"
                  create(context)
                elsif match = /^\/v1\/sandboxes\/(sbx_[a-zA-Z0-9_-]{1,80})(?:\/(start|stop|restart|exec))?$/.match(path)

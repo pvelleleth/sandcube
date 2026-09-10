@@ -10,7 +10,7 @@ make test GO="$PWD/.tools/go/bin/go"
 sudo python3 scripts/integration.py
 ```
 
-The Go suite passes with the race detector; `go vet` passes. All 32 Crystal specs pass, including the real PostgreSQL lifecycle/race tests when `TEST_DATABASE_URL` is set. The actual gVisor acceptance test passes through the Crystal HTTP API and Go Unix-socket adapter.
+The Go suite passes with the race detector; `go vet` passes. All 35 Crystal specs pass, including the real PostgreSQL lifecycle/race tests using `DATABASE_URL` (or an explicit `TEST_DATABASE_URL` override). The actual gVisor acceptance test passes through the Crystal HTTP API and Go Unix-socket adapter.
 
 ## Acceptance checks
 
@@ -39,7 +39,7 @@ A failed start never produces a normal process-exit event. Cleanup deletes non-r
 
 ## Scope of evidence
 
-These tests prove the first two milestones. They do not certify the full V1 service: disk quotas, capacity accounting, outbound networking, streaming/TTY, detached process management, TTL and crash reconciliation remain outside this milestone. Timeout currently targets the requested process, not a process tree. No public endpoint was deployed.
+The original checks above prove the first two milestones; Phase 3 coverage is recorded below. They do not certify the full V1 service: disk quotas, capacity accounting, outbound networking, streaming/TTY, durable process history, TTL and crash reconciliation remain outside these milestones. Timeout currently targets the requested process, not a process tree. No public endpoint was deployed.
 
 
 ## Phase 2 image acceptance
@@ -67,4 +67,11 @@ Verified through the real Crystal API, PostgreSQL, BuildKit, containerd and gVis
 
 Additional unit/database tests cover argument injection resistance and environment clearing, build timeout/log limits, gzip checksum/truncation, duplicate entries, special/extended tar types, archive expansion/entry limits, malformed uploads, concurrent image reservation/deletion, failed rollback reservation retention, deletion retries, and interrupted-build recovery. Go tests run with the race detector and `go vet`.
 
-BuildKit and PostgreSQL are test prerequisites, not mocked in the acceptance suite. PostgreSQL specs explicitly report a pending test when `TEST_DATABASE_URL` is absent. No production endpoint was deployed.
+BuildKit and PostgreSQL are test prerequisites, not mocked in the acceptance suite. PostgreSQL specs use `TEST_DATABASE_URL`, falling back to `DATABASE_URL`; they report a pending test only when neither is set. Each example creates and cleans up a unique schema, with the search path applied to every pooled connection so recovery tests cannot update existing application rows. The role needs CREATE SCHEMA permission. The BuildKit acceptance script still requires a dedicated test database. No production endpoint was deployed.
+
+
+## Phase 3 file and process acceptance
+
+The runtime acceptance harness now includes [Phase 3 checks and API limits](files-processes.md). It tests binary file transfer, executable uploads, live file replacement, oversized request rejection, traversal and symlink escapes, detached execution across API reconnect, captured logs and generated artifacts, concurrent exit codes, output bounds, cancellation, stopped file access, persistence, and stop/delete with active processes. Unit tests add concurrent symlink swapping, special-file rejection, hardlink-safe replacement, modes, and route validation.
+
+Verified on 2026-09-10: the build succeeded; Go tests passed with `-race` and `go vet` passed; Crystal reported 35 examples, zero failures/errors, and zero pending tests after running against `DATABASE_URL` with isolated test schemas. Schema cleanup was verified. The complete real containerd/gVisor runtime acceptance suite passed, including the executable upload → detached launch → public API restart/reconnect → logs/artifact retrieval → cancellation workflow. The test namespace had no remaining containers after cleanup.

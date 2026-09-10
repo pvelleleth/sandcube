@@ -2,3 +2,5 @@
 # gVisor's default root:self overlay is ephemeral across task recreation.
 [runsc_config]
   overlay2 = "none"
+  # File APIs modify the snapshot outside the sentry; revalidate cached entries.
+  file-access = "shared"

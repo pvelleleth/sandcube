@@ -51,10 +51,29 @@ def await_image(store, id, status)
   fail "Image did not reach #{status}: #{store.get(id)}"
 end
 
-if url = ENV["TEST_DATABASE_URL"]?
+# Recovery tests intentionally update all BUILDING rows. Give every example a
+# private schema, including every pooled connection used by concurrent fibers.
+def with_image_test_database(url : String, &block : DB::Database ->)
+  schema = "sandcube_spec_#{UUID.random.to_s.gsub("-", "")}"
+  DB.open(url) do |db|
+    # Install the hook before the pool's first checkout. Its initial connection
+    # must still be in setup mode, without statement auto-release enabled.
+    db.setup_connection do |connection|
+      connection.exec("SET search_path TO #{schema}")
+    end
+    db.exec("CREATE SCHEMA #{schema}")
+    begin
+      yield db
+    ensure
+      db.exec("DROP SCHEMA #{schema} CASCADE")
+    end
+  end
+end
+
+if url = ENV["TEST_DATABASE_URL"]? || ENV["DATABASE_URL"]?
   describe "PostgreSQL image lifecycle" do
     it "serializes concurrent creation reservations against deletion" do
-      DB.open(url) do |db|
+      with_image_test_database(url) do |db|
         store = Sandcube::ImageStore.new(db)
         12.times do
           id = "img_#{UUID.random.to_s.gsub("-", "")}"
@@ -90,7 +109,7 @@ if url = ENV["TEST_DATABASE_URL"]?
     end
 
     it "marks interrupted builds ERROR and removes their abandoned directories on restart" do
-      DB.open(url) do |db|
+      with_image_test_database(url) do |db|
         store = Sandcube::ImageStore.new(db)
         id = "img_#{UUID.random.to_s.gsub("-", "")}"
         root = File.join(Dir.tempdir, "sandcube-images-spec-#{UUID.random}")
@@ -110,7 +129,7 @@ if url = ENV["TEST_DATABASE_URL"]?
     end
 
     it "builds once, reserves two sandboxes, persists identity, and protects referenced images" do
-      DB.open(url) do |db|
+      with_image_test_database(url) do |db|
         store = Sandcube::ImageStore.new(db)
         builder = TestImageBuilder.new
         builder.gate = Channel(Nil).new
@@ -167,7 +186,7 @@ if url = ENV["TEST_DATABASE_URL"]?
     end
 
     it "records failed builds, cleans temporary files and partial imports, and rejects unsafe uploads" do
-      DB.open(url) do |db|
+      with_image_test_database(url) do |db|
         store = Sandcube::ImageStore.new(db)
         builder = TestImageBuilder.new
         builder.failure = true
@@ -208,7 +227,7 @@ if url = ENV["TEST_DATABASE_URL"]?
     end
 
     it "retains reservations when rollback fails and releases them after successful deletion" do
-      DB.open(url) do |db|
+      with_image_test_database(url) do |db|
         store = Sandcube::ImageStore.new(db)
         id = "img_#{UUID.random.to_s.gsub("-", "")}"
         begin
@@ -232,5 +251,5 @@ if url = ENV["TEST_DATABASE_URL"]?
     end
   end
 else
-  pending "PostgreSQL image lifecycle (set TEST_DATABASE_URL to a dedicated test database)" { }
+  pending "PostgreSQL image lifecycle (set TEST_DATABASE_URL or DATABASE_URL)" { }
 end

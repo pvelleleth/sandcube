@@ -15,6 +15,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from phase3_checks import check_phase3
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = 'docker.io/library/busybox:1.37.0'
@@ -105,6 +106,18 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
                 ids.append(sb['id'])
                 assert sb['status'] == 'running'
             sid, other = ids
+            def reconnect_api():
+                global crystal
+                stop(crystal)
+                crystal = start('sandcube', [], env, log)
+                for _ in range(100):
+                    try:
+                        api('GET', '/health')
+                        return
+                    except (OSError, AssertionError):
+                        time.sleep(.1)
+                raise RuntimeError('API did not restart')
+            check_phase3(api, execute, base, TOKEN, sid, other, reconnect_api)
             prefix = f'/v1/sandboxes/{sid}'
             info = json.loads(ctr('containers', 'info', sid).stdout)
             assert info['Runtime']['Name'] == 'io.containerd.runsc.v1', info

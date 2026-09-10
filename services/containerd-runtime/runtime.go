@@ -65,7 +65,10 @@ type Runtime struct {
 	namespace  string
 	configPath string
 	buildRoot  string
+	stateRoot  string
 	imageMu    sync.Mutex
+	processMu  sync.Mutex
+	processes  map[string]*trackedProcess
 }
 
 func (r *Runtime) ctx(ctx context.Context) context.Context {
@@ -211,6 +214,9 @@ func (r *Runtime) Stop(ctx context.Context, id string) (Sandbox, error) {
 	if err = r.deleteTask(ctx, t); err != nil {
 		return Sandbox{}, err
 	}
+	if err = r.settleProcesses(ctx, id); err != nil {
+		return Sandbox{}, err
+	}
 	return r.describe(ctx, c)
 }
 
@@ -252,7 +258,11 @@ func (r *Runtime) Delete(ctx context.Context, id string) error {
 	if _, err = r.Stop(ctx, id); err != nil {
 		return err
 	}
-	return c.Delete(ctx, containerd.WithSnapshotCleanup)
+	if err = c.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
+		return err
+	}
+	r.forgetProcesses(id)
+	return nil
 }
 
 // Cap captured output while continuing to drain pipes, avoiding deadlocks and unbounded memory.

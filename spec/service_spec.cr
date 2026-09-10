@@ -69,3 +69,46 @@ describe Sandcube::Service do
     runtime.calls.should be_empty
   end
 end
+
+class FileRuntime < FakeRuntime
+  def request(method : String, path : String, body : String? = nil) : JSON::Any
+    super
+    JSON.parse({content: Base64.strict_encode(Bytes[0, 255, 128, 10])}.to_json)
+  end
+end
+
+describe "File and process API" do
+  it "preserves binary upload and download bodies" do
+    runtime = FileRuntime.new
+    bytes = String.new(Bytes[0, 255, 128, 10])
+    result = request(runtime, "PUT", "/v1/sandboxes/sbx_test/files/content?path=%2Fapp%2Fdata", bytes)
+    result.status_code.should eq(200)
+    input = JSON.parse(runtime.calls.last[2].not_nil!)
+    input["path"].as_s.should eq("/app/data")
+    Base64.decode(input["content"].as_s).should eq(bytes.to_slice)
+    result = request(runtime, "GET", "/v1/sandboxes/sbx_test/files/content?path=/app/data")
+    result.body.to_slice.should eq(bytes.to_slice)
+    result.headers["Content-Type"].should eq("application/octet-stream")
+  end
+
+  it "rejects encoded traversal and oversized uploads before calling runtime" do
+    runtime = FakeRuntime.new
+    request(runtime, "GET", "/v1/sandboxes/sbx_test/files/content?path=%2F..%2Fhost").status_code.should eq(400)
+    request(runtime, "PUT", "/v1/sandboxes/sbx_test/files/content?path=/large", "x" * (Sandcube::Files::MAX_TRANSFER + 1)).status_code.should eq(413)
+    runtime.calls.should be_empty
+  end
+
+  it "forwards process creation, listing, status, logs and kill" do
+    runtime = FakeRuntime.new
+    prefix = "/v1/sandboxes/sbx_test/processes"
+    body = %({"command":["sleep","100"]})
+    request(runtime, "POST", prefix, body).status_code.should eq(202)
+    runtime.calls.last.should eq({"POST", "/containers/sbx_test/processes", body})
+    pid = "proc_" + "a" * 32
+    {prefix, "#{prefix}/#{pid}", "#{prefix}/#{pid}/logs"}.each do |path|
+      request(runtime, "GET", path).status_code.should eq(200)
+    end
+    request(runtime, "POST", "#{prefix}/#{pid}/kill").status_code.should eq(200)
+    request(runtime, "GET", "#{prefix}/../../host").status_code.should eq(404)
+  end
+end

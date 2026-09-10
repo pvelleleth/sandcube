@@ -1,8 +1,8 @@
-# Sandcube — runtime and image-building milestones
+# Sandcube — runtime, image, file and process milestones
 
 A minimal Crystal API calling a Go adapter over a private Unix socket. The adapter uses the official containerd v2 SDK and **requires gVisor** (`io.containerd.runsc.v1`). There is no runc fallback.
 
-Implemented: Dockerfile image builds with BuildKit, PostgreSQL image metadata, OCI import/inspection/deletion, and sandbox creation from reusable image IDs; plus create from an existing OCI image, start, stop, restart, inspect, synchronous exec, and delete. See [image setup, API, and testing](docs/images.md). Stop deletes only the task; start reuses the same container and writable snapshot. Runtime metadata lives in containerd and survives API/adapter restarts.
+Implemented: binary file APIs, safe directory operations, detached execution with process status/logs/cancellation ([Phase 3 API and limits](docs/files-processes.md)); Dockerfile image builds with BuildKit, PostgreSQL image metadata, OCI import/inspection/deletion, and sandbox creation from reusable image IDs; plus create from an existing OCI image, start, stop, restart, inspect, synchronous exec, and delete. See [image setup, API, and testing](docs/images.md). Stop deletes only the task; start reuses the same container and writable snapshot. Runtime metadata lives in containerd and survives API/adapter restarts.
 
 ## Prerequisites
 
@@ -95,10 +95,10 @@ curl -sS "http://127.0.0.1:8080/v1/sandboxes/$SANDBOX_ID/exec" \
 | POST | `/v1/sandboxes/:id/restart` | Stop then start under a lifecycle lock |
 | DELETE | `/v1/sandboxes/:id` | Removes container and writable snapshot, retains image |
 
-Exec accepts `command` (argv), optional `cwd` (absolute path), `env` (string map), and `timeout_seconds` (1–3600, default 30). A nonzero process exit is a successful API response with its exit code. Output is capped at 1 MiB per stream and continues to be drained after that limit. The API request limit is 64 KiB.
+Exec accepts `command` (argv), optional `cwd` (absolute path), `env` (string map), and `timeout_seconds` (1–3600, default 30). A nonzero process exit is a successful API response with its exit code. Output is capped at 1 MiB per stream and continues to be drained after that limit. The JSON command request limit is 64 KiB; file transfers use a separate 16 MiB limit.
 
 The create `command` must be a long-running environment process available in the image; the platform assumes no shell or utilities. It is started again on each start, while previously executed workload processes are not restored. The example uses BusyBox's `sleep infinity` solely for the milestone fixture.
 
 ## Scope
 
-This implements Phases 1 and 2, not the full V1 service. Sandboxes have isolated network namespaces **without outbound connectivity**. CPU, memory and process limits are configured; disk quotas, aggregate VPS capacity checks, full sandbox metadata/reconciliation, streaming/TTY, detached exec/process APIs, file APIs, TTL and crash reconciliation are future work. Exec timeout kills the requested process; it does not yet provide a process-tree cancellation API. Do not expose this milestone as a public multi-tenant service.
+This implements Phases 1–3, not the full V1 service. Sandboxes have isolated network namespaces **without outbound connectivity**. CPU, memory and process limits are configured; disk quotas, aggregate VPS capacity checks, full sandbox metadata/reconciliation, streaming/TTY, durable process history, TTL and crash reconciliation are future work. Exec timeout kills the requested process; it does not yet provide a process-tree cancellation API. Do not expose this milestone as a public multi-tenant service.

@@ -78,10 +78,11 @@ On API startup, interrupted BUILDING records become ERROR and abandoned build di
 ## Verification
 
 ```sh
-# Use a dedicated test database, never a production DATABASE_URL.
-TEST_DATABASE_URL=postgres://... make test
+# Specs use temporary schemas in TEST_DATABASE_URL, falling back to DATABASE_URL.
+# The database role needs CREATE SCHEMA permission.
+DATABASE_URL=postgres://... make test
 
-# Requires running containerd, BuildKit and gVisor; these tests launch their own API/adapter.
+# Acceptance requires a dedicated test database plus containerd, BuildKit and gVisor.
 TEST_DATABASE_URL=postgres://... \
 SANDCUBE_BUILDKIT_ADDRESS=unix:///run/sandcube-buildkit/buildkitd.sock \
 make integration-images

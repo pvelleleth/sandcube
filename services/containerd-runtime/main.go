@@ -8,12 +8,14 @@ import (
 	"fmt"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/errdefs"
+	"golang.org/x/sys/unix"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -123,6 +125,56 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		unlock := s.lock(id)
 		defer func() { unlock() }()
 		switch {
+		case len(parts) == 3 && parts[2] == "files" && r.Method == "POST":
+			backend, ok := s.backend.(FileBackend)
+			if !ok {
+				failure(w, 503, "FILES_UNAVAILABLE", errors.New("file backend unavailable"))
+				return
+			}
+			var req FileRequest
+			r.Body = http.MaxBytesReader(w, r.Body, 24<<20)
+			d := json.NewDecoder(r.Body)
+			d.DisallowUnknownFields()
+			if e := d.Decode(&req); e != nil {
+				failure(w, 400, "INVALID_REQUEST", e)
+				return
+			}
+			if d.Decode(new(any)) != io.EOF {
+				failure(w, 400, "INVALID_REQUEST", errors.New("expected one object"))
+				return
+			}
+			value, err = backend.File(ctx, id, req)
+		case len(parts) >= 3 && parts[2] == "processes":
+			backend, ok := s.backend.(ProcessBackend)
+			if !ok {
+				failure(w, 503, "PROCESSES_UNAVAILABLE", errors.New("process backend unavailable"))
+				return
+			}
+			switch {
+			case len(parts) == 3 && r.Method == "POST":
+				var req ExecRequest
+				if e := decode(w, r, &req); e != nil {
+					failure(w, 400, "INVALID_REQUEST", e)
+					return
+				}
+				if len(req.Command) == 0 || req.Command[0] == "" || req.Timeout != 0 || (req.Cwd != "" && !strings.HasPrefix(req.Cwd, "/")) {
+					failure(w, 400, "INVALID_REQUEST", errors.New("invalid command/cwd; detached execution does not accept a timeout"))
+					return
+				}
+				value, err = backend.StartProcess(ctx, id, req)
+				status = 202
+			case len(parts) == 3 && r.Method == "GET":
+				value, err = backend.Processes(ctx, id)
+			case len(parts) == 4 && r.Method == "GET":
+				value, err = backend.Process(ctx, id, parts[3])
+			case len(parts) == 5 && parts[4] == "logs" && r.Method == "GET":
+				value, err = backend.ProcessLogs(ctx, id, parts[3])
+			case len(parts) == 5 && parts[4] == "kill" && r.Method == "POST":
+				value, err = backend.KillProcess(ctx, id, parts[3])
+			default:
+				failure(w, 404, "NOT_FOUND", errors.New("unknown route"))
+				return
+			}
 		case len(parts) == 2 && r.Method == "GET":
 			value, err = s.backend.Inspect(ctx, id)
 		case len(parts) == 2 && r.Method == "DELETE":
@@ -161,6 +213,18 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		code := "RUNTIME_ERROR"
 		status = 500
 		switch {
+		case errors.Is(err, errInvalidPath):
+			status = 400
+			code = "INVALID_PATH"
+		case errors.Is(err, errFileTooLarge), errdefs.IsResourceExhausted(err):
+			status = 413
+			code = "LIMIT_EXCEEDED"
+		case errors.Is(err, unix.ENOENT):
+			status = 404
+			code = "FILE_NOT_FOUND"
+		case errors.Is(err, unix.EEXIST), errors.Is(err, unix.ENOTEMPTY), errors.Is(err, unix.EISDIR), errors.Is(err, unix.ENOTDIR):
+			status = 409
+			code = "FILE_CONFLICT"
 		case errdefs.IsNotFound(err):
 			status = 404
 			code = "NOT_FOUND"
@@ -182,10 +246,14 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func main() {
 	socket := flag.String("socket", "/run/sandcube/runtime.sock", "private Unix socket")
 	address := flag.String("containerd", "/run/sandcube-containerd/containerd.sock", "containerd socket")
+	stateRoot := flag.String("containerd-state", "", "containerd state directory (default: socket directory)")
 	configPath := flag.String("runsc-config", "/etc/sandcube/runsc.toml", "gVisor configuration (overlay2=none required)")
 	buildRoot := flag.String("build-root", "/var/lib/sandcube/builds", "shared private build directory")
 	namespace := flag.String("namespace", "sandcube", "dedicated containerd namespace")
 	flag.Parse()
+	if *stateRoot == "" {
+		*stateRoot = filepath.Dir(*address)
+	}
 	if _, err := os.Stat(*configPath); err != nil {
 		log.Fatal(err)
 	}
@@ -209,7 +277,7 @@ func main() {
 		listener.Close()
 		log.Fatal(err)
 	}
-	srv := &http.Server{Handler: &server{backend: &Runtime{client: client, namespace: *namespace, configPath: *configPath, buildRoot: *buildRoot}}, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
+	srv := &http.Server{Handler: &server{backend: &Runtime{client: client, namespace: *namespace, configPath: *configPath, buildRoot: *buildRoot, stateRoot: *stateRoot}}, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	go func() {
