@@ -1,0 +1,9 @@
+{
+  "cniVersion": "1.0.0",
+  "name": "sandcube-buildkit",
+  "plugins": [
+    {"type": "bridge", "bridge": "sc-build0", "isGateway": true, "ipMasq": true,
+     "ipam": {"type": "host-local", "subnet": "10.89.0.0/24", "routes": [{"dst": "0.0.0.0/0"}]}},
+    {"type": "firewall", "backend": "iptables"}
+  ]
+}

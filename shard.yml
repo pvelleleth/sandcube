@@ -1,0 +1,11 @@
+name: sandcube
+version: 0.1.0
+crystal: '>= 1.19.0'
+license: MIT
+targets:
+  sandcube:
+    main: src/main.cr
+dependencies:
+  pg:
+    github: will/crystal-pg
+    version: ~> 0.29

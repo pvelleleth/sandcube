@@ -1,0 +1,9 @@
+.tools/
+bin/
+.crystal/
+*.log
+.env
+.integration.lock
+__pycache__/
+
+lib/

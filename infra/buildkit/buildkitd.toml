@@ -1,0 +1,14 @@
+# Dedicated BuildKit daemon; never enable security.insecure or network.host entitlements.
+root = "/var/lib/sandcube-buildkit"
+[grpc]
+  address = ["unix:///run/sandcube-buildkit/buildkitd.sock"]
+  uid = 0
+  gid = 0
+[worker.oci]
+  enabled = true
+  snapshotter = "overlayfs"
+  networkMode = "cni"
+  cniConfigPath = "/etc/sandcube/buildkit-cni.json"
+  cniBinaryPath = "/opt/cni/bin"
+[worker.containerd]
+  enabled = false

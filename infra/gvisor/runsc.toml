@@ -1,0 +1,4 @@
+# Write directly to containerd's persistent writable snapshot.
+# gVisor's default root:self overlay is ephemeral across task recreation.
+[runsc_config]
+  overlay2 = "none"
