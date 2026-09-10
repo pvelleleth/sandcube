@@ -39,7 +39,7 @@ A failed start never produces a normal process-exit event. Cleanup deletes non-r
 
 ## Scope of evidence
 
-The original checks above prove the first two milestones; Phase 3 coverage is recorded below. They do not certify the full V1 service: disk quotas, capacity accounting, outbound networking and streaming/TTY remain outside these milestones. Phase 4 recovery and cleanup are covered by the separate suite described below. Timeout currently targets the requested process, not a process tree. No public endpoint was deployed.
+The original checks above prove the first two milestones; Phase 3 coverage is recorded below. They do not certify the full V1 service. Phase 5 below adds disk quotas, capacity accounting and outbound networking; streaming/TTY remain outside the implemented milestones. Phase 4 recovery and cleanup are covered by the separate suite described below. Timeout currently targets the requested process, not a process tree. No public endpoint was deployed.
 
 
 ## Phase 2 image acceptance
@@ -96,3 +96,26 @@ The new `scripts/integration_reliability.py` suite passes these checks:
 Database fault tests additionally cover failed create compensation and error replay, restart's durable stop/start boundary, cleanup failure with retained image reservations, inventory outages, missing containers, and key conflicts. Go tests cover atomic history recovery, corrupt metadata rejection, bounded stdout/stderr capture, orphan setup-directory cleanup, and retrying runtime process-record deletion while retaining history.
 
 The test namespace was left with no containers or sandbox snapshots; reusable base image content remains. All isolated PostgreSQL spec schemas were removed. See [reliability operations and limits](reliability.md) for deployment configuration, retention, and the distinction between adapter crashes and host/shim failure.
+
+
+## Phase 5 resource and network acceptance
+
+Verified on 2026-09-10 using a disposable 1 GiB XFS filesystem mounted with `prjquota`, a separate containerd instance, the real gVisor runtime, and a dedicated local PostgreSQL test database. The existing host filesystem was not reformatted. All 58 Crystal examples pass with zero failures, errors or pending examples. Go tests pass with the race detector, including the real kernel project-quota test, and `go vet` passes.
+
+`scripts/integration_resources.py` passes the Phase 4 recovery harness and these additional checks:
+
+- Concurrent real API creates respect capacity; stop releases compute while preserving disk, and a competing start is rejected until capacity is freed.
+- Public DNS and HTTPS package-index downloads work before and after API/adapter crashes.
+- Host private/public addresses, gateway services, metadata addresses, private networks, peer sandboxes, rebound hostnames and IPv6 destinations are blocked. Firewall packet counters confirm the drops.
+- Guest writes and stopped file API writes cannot exceed the quota. Stop/start and crashes retain enforcement; deletion verifies physical blocks/inodes are reclaimed.
+- Stop removes conntrack entries before its address is reusable.
+- CPU usage under load stays within the configured cgroup budget. Memory swap is disabled, group OOM killing terminates the task, and reconciliation releases compute after actual OOM.
+- Quota-bearing orphan snapshots are reclaimed after metadata loss; disk reservations remain conservative until deletion completes.
+- SIGKILL immediately after firewall creation, namespace creation, veth creation, address assignment and link activation recovers safely. SIGKILL during conntrack and firewall deletion also converges.
+- Successful completion leaves no sandbox containers, network namespaces, firewall tables or resource ownership journals for the run.
+
+Database tests independently exhaust CPU, memory and disk, race starts against creates across coordinators, retain reservations through lost responses and failed cleanup, handle stopped expiration, reject unaccounted runtime inventory, and reject conflicting persisted host budgets. Additional Go tests reject corrupt ownership journals without discarding them.
+
+See [deployment prerequisites and migration](resources-networking.md). Tests kill API/adapter processes and exercise real kernel resources; they do not reboot the host or promise to restore running processes across a host reboot.
+
+The existing runtime/file/process and Dockerfile/image acceptance suites also pass with the new quotas and networking. Final checks found zero live test sandboxes, zero CPU/memory/disk reservations and zero isolated spec schemas. The disposable runtime, BuildKit daemon, test databases, XFS mount and temporary forwarding allowances were cleaned up.

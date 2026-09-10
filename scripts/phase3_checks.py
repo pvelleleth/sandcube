@@ -116,14 +116,16 @@ def check_phase3(api, execute, base, token, sid, other, reconnect_api):
 
     # A separate sandbox proves deletion handles active processes and does not
     # hold a lock for the lifetime of a detached command.
+    api('POST', f'/v1/sandboxes/{other}/stop')
     doomed = api('POST', '/v1/sandboxes', {'image': 'docker.io/library/busybox:1.37.0', 'command': ['/bin/sleep', 'infinity']}, expected=201)['id']
     dp = f'/v1/sandboxes/{doomed}'
     try:
         for _ in range(3):
             api('POST', dp + '/processes', {'command': ['/bin/sleep', '600']}, expected=202)
         api('DELETE', dp)
-        api('GET', dp, expected=404)
+        assert api('GET', dp)['status'] == 'deleted'
         api('GET', dp + '/processes', expected=404)
     finally:
         api('DELETE', dp)
+        api('POST', f'/v1/sandboxes/{other}/start')
     print('PASS: delete with running processes', flush=True)

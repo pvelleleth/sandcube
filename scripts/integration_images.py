@@ -30,6 +30,8 @@ fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def api(method, path, body=None, expected=200, content_type='application/json'):
+    if method == 'POST' and path == '/v1/sandboxes' and isinstance(body, dict):
+        body = dict(body, disk_mb=body.get('disk_mb', 64))
     data = body if isinstance(body, bytes) else json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method,
         headers={'Authorization': 'Bearer ' + TOKEN, 'Content-Type': content_type})
@@ -117,6 +119,11 @@ def ctr(*args, check=True):
     return subprocess.run(['ctr', '--address', ADDRESS, '-n', NAMESPACE, *args], text=True, capture_output=True, check=check)
 
 
+assert not ctr('containers', 'list', '-q').stdout.strip(), 'Use an empty dedicated test namespace'
+def sql(query):
+    return subprocess.run(['psql', DATABASE, '-v', 'ON_ERROR_STOP=1', '-At'],input=query,text=True,capture_output=True,check=True).stdout.strip()
+assert not sql("SELECT to_regclass('public.sandboxes')") or sql("SELECT count(*) FROM sandboxes WHERE status!='deleted'") == '0', 'Use a dedicated test database'
+
 with tempfile.TemporaryDirectory(prefix='sc-images-') as work:
     root = Path(work) / 'builds'
     sock = work + '/runtime.sock'
@@ -124,12 +131,12 @@ with tempfile.TemporaryDirectory(prefix='sc-images-') as work:
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
-    env = dict(os.environ, DATABASE_URL=DATABASE, SANDCUBE_RUNTIME_SOCKET=sock, SANDCUBE_API_KEY=TOKEN,
+    env = dict(os.environ, DATABASE_URL=DATABASE, SANDCUBE_CAPACITY_CPU='2', SANDCUBE_CAPACITY_MEMORY_MB='512', SANDCUBE_CAPACITY_DISK_MB='256', SANDCUBE_RUNTIME_SOCKET=sock, SANDCUBE_API_KEY=TOKEN,
         SANDCUBE_PORT=str(port), SANDCUBE_BUILD_ROOT=str(root))
     with open(work + '/services.log', 'w+') as log:
         try:
             adapter = start('containerd-runtime', ['-socket', sock, '-containerd', ADDRESS, '-namespace', NAMESPACE,
-                '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml'), '-build-root', str(root)], env, log)
+                '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml'), '-build-root', str(root), '-history-root', work + '/history'], env, log)
             service = start('sandcube', [], env, log)
             health()
             # Includes RUN package installation, COPY, ARG, ENV, and WORKDIR semantics.
@@ -194,6 +201,8 @@ RUN echo built > /workspace/build-marker
                 assert not list(root.glob('build-*'))
             print('PASS: failed RUN persists ERROR/logs, rejected missing/failed images, traversal/absolute/link archives, failure cleanup', flush=True)
 
+            # Leave compute capacity for the failed-start rollback check.
+            api('POST', f'/v1/sandboxes/{first}/stop')
             # Rollback must release image reservations when no container survives.
             api('POST', '/v1/sandboxes', {'image_id': iid, 'command': ['/does-not-exist']}, 500)
             api('DELETE', '/v1/sandboxes/' + first)

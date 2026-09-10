@@ -147,7 +147,7 @@ module Sandcube
 
     private def create(context) : JSON::Any
       input = JSON.parse(read_body(context)).as_h
-      allowed = {"image", "image_id", "command", "cpu", "memory_mb", "pids"}
+      allowed = {"image", "image_id", "command", "cpu", "memory_mb", "disk_mb", "pids"}
       raise ArgumentError.new("Unknown create field") unless input.keys.all? { |key| allowed.includes?(key) }
       raise ArgumentError.new("Provide exactly one of image or image_id") unless input.has_key?("image") != input.has_key?("image_id")
       command = input["command"].as_a.map(&.as_s)
@@ -156,6 +156,7 @@ module Sandcube
       # Parse all fields before reserving an image reference.
       cpu = input["cpu"]?.try(&.as_i) || 1
       memory = input["memory_mb"]?.try(&.as_i) || 256
+      disk = input["disk_mb"]?.try(&.as_i) || 1024
       pids = input["pids"]?.try(&.as_i) || 128
       image = if image_id
                 store = @image_store || raise ImageError.new(503, "IMAGES_UNAVAILABLE", "Image metadata is not configured")
@@ -163,7 +164,7 @@ module Sandcube
               else
                 input["image"].as_s
               end
-      config = {id: id, image: image, command: command, cpu: cpu, memory_mb: memory, pids: pids}
+      config = {id: id, image: image, command: command, cpu: cpu, memory_mb: memory, disk_mb: disk, pids: pids}
       begin
         @runtime.request("POST", "/containers", config.to_json)
         result = @runtime.request("POST", "/containers/#{id}/start")

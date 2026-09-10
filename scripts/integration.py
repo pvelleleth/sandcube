@@ -35,6 +35,8 @@ def ctr(*args, check=True):
 
 
 def api(method, path, body=None, expected=200, token=TOKEN):
+    if method == 'POST' and path == '/v1/sandboxes' and isinstance(body, dict):
+        body = dict(body, disk_mb=body.get('disk_mb', 64))
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method,
         headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
@@ -73,11 +75,16 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
-    env = dict(os.environ, SANDCUBE_RUNTIME_SOCKET=sock, SANDCUBE_API_KEY=TOKEN, SANDCUBE_PORT=str(port))
+    env = dict(os.environ, DATABASE_URL=os.environ['TEST_DATABASE_URL'], SANDCUBE_CAPACITY_CPU='2', SANDCUBE_CAPACITY_MEMORY_MB='512', SANDCUBE_CAPACITY_DISK_MB='256', SANDCUBE_RUNTIME_SOCKET=sock, SANDCUBE_API_KEY=TOKEN, SANDCUBE_PORT=str(port))
     baseline = set(ctr('containers', 'list', '-q').stdout.split())
+    assert not baseline, 'Use an empty dedicated test namespace'
+    def sql(query):
+        return subprocess.run(['psql', env['DATABASE_URL'], '-v', 'ON_ERROR_STOP=1', '-At'],input=query,text=True,capture_output=True,check=True).stdout.strip()
+    assert not sql("SELECT to_regclass('public.sandboxes')") or sql("SELECT count(*) FROM sandboxes WHERE status!='deleted'") == '0', 'Use a dedicated test database'
+
     with open(work + '/services.log', 'w+') as log:
         try:
-            adapter = start('containerd-runtime', ['-socket', sock, '-containerd', ADDRESS, '-namespace', NAMESPACE, '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml')], env, log)
+            adapter = start('containerd-runtime', ['-socket', sock, '-containerd', ADDRESS, '-namespace', NAMESPACE, '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml'), '-history-root', work + '/history'], env, log)
             crystal = start('sandcube', [], env, log)
             for _ in range(100):
                 try:
@@ -126,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
             assert spec['annotations']['io.kubernetes.cri.sandbox-id'] == sid
             assert spec['process']['noNewPrivileges'] is True
             assert not spec['process']['capabilities'].get('bounding', [])
-            assert any(n['type'] == 'network' and not n.get('path') for n in spec['linux']['namespaces'])
+            assert any(n['type'] == 'network' and n.get('path', '').startswith('/run/netns/scn') for n in spec['linux']['namespaces'])
             assert spec['linux']['resources']['memory']['limit'] == 256 * 1024 * 1024
             assert spec['linux']['resources']['pids']['limit'] == 128
             cgroup = Path('/sys/fs/cgroup') / spec['linux']['cgroupsPath'].lstrip('/')
@@ -136,7 +143,7 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
             result = execute(sid, ['/bin/dmesg'])
             assert 'gVisor' in result['stdout'], result
             assert execute(sid, ['/bin/sh', '-c', 'test ! -S /run/containerd/containerd.sock && test ! -e /root/sandcube/build.md'])['exit_code'] == 0
-            assert execute(sid, ['/bin/ip', 'route'])['stdout'] == ''
+            assert 'default via ' in execute(sid, ['/bin/ip', 'route'])['stdout']
             marker = secrets.token_hex(24)
             result = execute(sid, ['/bin/sh', '-c', 'mkdir -p /workspace; printf "%s" "$MARKER" > /workspace/proof; echo stderr >&2; exit 7'], env={'MARKER': marker})
             assert result['exit_code'] == 7 and result['stderr'] == 'stderr\n', result
@@ -159,7 +166,7 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
             # Prove persistence does not depend on either service's memory.
             stop(crystal)
             stop(adapter)
-            adapter = start('containerd-runtime', ['-socket', sock, '-containerd', ADDRESS, '-namespace', NAMESPACE, '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml')], env, log)
+            adapter = start('containerd-runtime', ['-socket', sock, '-containerd', ADDRESS, '-namespace', NAMESPACE, '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml'), '-history-root', work + '/history'], env, log)
             crystal = start('sandcube', [], env, log)
             for _ in range(100):
                 try:
@@ -180,7 +187,7 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
             print('PASS: stop/start and service-restart persistence, repeated and concurrent lifecycle calls', flush=True)
             for _ in range(2):
                 assert api('DELETE', prefix)['status'] == 'deleted'
-            api('GET', prefix, expected=404)
+            assert api('GET', prefix)['status'] == 'deleted'
             assert ctr('snapshots', 'info', sid, check=False).returncode != 0
             assert sid not in ctr('containers', 'list', '-q').stdout.split()
             assert execute(other, ['/bin/true'])['exit_code'] == 0

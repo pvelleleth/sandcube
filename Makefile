@@ -5,7 +5,7 @@ export GOPATH ?= /tmp/sandcube-gopath
 export GOMAXPROCS ?= 2
 export GOCACHE ?= /tmp/sandcube-gocache
 
-.PHONY: build test integration integration-images integration-reliability deps fmt
+.PHONY: build test integration integration-images integration-reliability integration-resources deps fmt
 deps:
 	shards install
 
@@ -27,6 +27,9 @@ integration-images: build
 
 integration-reliability: build
 	python3 scripts/integration_reliability.py
+
+integration-resources: build
+	python3 scripts/integration_resources.py
 
 fmt:
 	cd services/containerd-runtime && $(GO) fmt ./...

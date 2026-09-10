@@ -64,6 +64,9 @@ func (r *Runtime) File(ctx context.Context, id string, req FileRequest) (any, er
 	if err != nil {
 		return nil, err
 	}
+	if err = r.checkQuota(ctx, id); err != nil {
+		return nil, err
+	}
 	// Reuse the task's mounted overlay. Mounting the same upper/work dirs a
 	// second time gives separate overlay caches and can corrupt live updates.
 	if _, taskErr := c.Task(ctx, nil); taskErr == nil {

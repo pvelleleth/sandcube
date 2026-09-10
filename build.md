@@ -1798,6 +1798,24 @@ TTL cleanup
 
 ---
 
+## Phase 5 — Resource Enforcement and Secure Networking
+
+Implement:
+
+* Enforce each sandbox's `disk_mb` writable-storage limit with XFS project quotas, covering overlay upper/work directories and stopped file API writes.
+* Reserve CPU, memory and disk in PostgreSQL before create/start/restart; serialize admission with lifecycle intent across API processes.
+* Enable IPv4 internet access with public DNS, per-sandbox routed network namespaces, NAT and fail-closed firewall rules.
+* Block host services (including host public IPs), private/special-use networks, cloud metadata, unsolicited ingress, IPv6 and other sandboxes.
+* Recover reservations, quotas and network ownership after API/adapter crashes, partial setup and interrupted cleanup.
+
+Success criteria:
+
+Sandboxes download packages, cannot reach protected destinations, cannot exceed their resource limits, and release capacity after confirmed cleanup. Stop releases CPU/memory and networking while preserving disk and its reservation. Delete and expiration release disk only after physical snapshot reclamation. Concurrent admission and crash recovery must not overcommit capacity or leave unprotected networking.
+
+Implementation and deployment requirements: [Resource enforcement and secure networking](docs/resources-networking.md). Acceptance suite: `make integration-resources`; PostgreSQL race/fault tests and an optional real XFS quota test run with `make test`.
+
+---
+
 # 50. V1 Definition of Done
 
 V1 is complete when this workflow works reliably:

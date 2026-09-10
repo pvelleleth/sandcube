@@ -1,4 +1,7 @@
 require "./service"
+require "./environment"
+
+Sandcube::Environment.load
 
 Log.setup("*", :info, Log::IOBackend.new(STDOUT, formatter: Log::Formatter.new do |entry, io|
   io << {time: entry.timestamp.to_rfc3339, level: entry.severity.to_s.downcase,
@@ -6,9 +9,9 @@ Log.setup("*", :info, Log::IOBackend.new(STDOUT, formatter: Log::Formatter.new d
 end))
 
 runtime = Sandcube::ContainerdRuntime.new(ENV.fetch("SANDCUBE_RUNTIME_SOCKET", "/run/sandcube/runtime.sock"))
-database = ENV["DATABASE_URL"]?.try { |url| DB.open(url) }
+database = DB.open(ENV.fetch("DATABASE_URL"))
 store = database.try { |db| Sandcube::ImageStore.new(db) }
-reliability = database.try { |db| Sandcube::Reliability.new(db, runtime) }
+reliability = database.try { |db| Sandcube::Reliability.new(db, runtime, Sandcube::Capacity.from_env) }
 images = (ENV.fetch("SANDCUBE_IMAGE_API_ENABLED", "true") == "true" ? store : nil).try do |db|
   Sandcube::ImageManager.new(db,
     Sandcube::BuildKitImageBuilder.new(runtime, ENV.fetch("SANDCUBE_BUILDKIT_ADDRESS", "unix:///run/buildkit/buildkitd.sock"), ENV.fetch("SANDCUBE_BUILDCTL", "buildctl")),

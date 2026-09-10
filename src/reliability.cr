@@ -1,5 +1,6 @@
 require "digest/sha256"
 require "./images/store"
+require "./capacity"
 
 module Sandcube
   # A single host-wide database lock serializes lifecycle intent, runtime operations,
@@ -9,9 +10,18 @@ module Sandcube
   class Reliability
     @@local_lock = Mutex.new
 
-    def initialize(@db : DB::Database, @runtime : Runtime)
-      {{ read_file("#{__DIR__}/../migrations/002_reliability.sql") }}.split(';').each do |sql|
-        @db.exec(sql) unless sql.strip.empty?
+    def initialize(@db : DB::Database, @runtime : Runtime, @capacity : Capacity = Capacity.new)
+      @db.using_connection do |conn|
+        conn.transaction do
+          conn.exec("SELECT pg_advisory_xact_lock(1935764580)")
+          {{ read_file("#{__DIR__}/../migrations/002_reliability.sql") }}.split(';').each do |sql|
+            conn.exec(sql) unless sql.strip.empty?
+          end
+          {{ read_file("#{__DIR__}/../migrations/003_resources.sql") }}.split(';').each do |sql|
+            conn.exec(sql) unless sql.strip.empty?
+          end
+          @capacity.configure(conn)
+        end
       end
     end
 
@@ -50,7 +60,7 @@ module Sandcube
       row = get(conn, id)
       config = row["config"]
       JSON.parse({id: id, status: row["status"], snapshot_key: id, image_id: config["image_id"]?,
-                  cpu: config["cpu"], memory_mb: config["memory_mb"], pids: config["pids"],
+                  disk_mb: config["disk_mb"], cpu: config["cpu"], memory_mb: config["memory_mb"], pids: config["pids"],
                   expires_at: row["expires_at"], error_message: row["error_message"]}.to_json)
     end
 
@@ -72,19 +82,28 @@ module Sandcube
             return JSON.parse(conn.query_one("SELECT response FROM lifecycle_requests WHERE key=$1", key, as: String))
           end
         end
+        if {"create", "start", "restart"}.includes?(action)
+          # Unknown runtime objects have no trustworthy reservation. Wait for
+          # orphan cleanup instead of admitting work against incomplete capacity.
+          @runtime.request("GET", "/containers").as_a.each do |container|
+            known = conn.query_one?("SELECT id FROM sandboxes WHERE id=$1 AND status!='deleted'", container["id"].as_s, as: String)
+            raise ImageError.new(503, "CAPACITY_UNAVAILABLE", "Runtime inventory contains an unaccounted sandbox; reconciliation is required") unless known
+          end
+        end
         id = action == "create" ? "sbx_#{UUID.random.to_s.gsub("-", "")}" : path.split('/')[3]
         conn.transaction do
           if action == "create"
             input = JSON.parse(body || "{}").as_h
-            allowed = {"image", "image_id", "command", "cpu", "memory_mb", "pids", "ttl_seconds"}
+            allowed = {"image", "image_id", "command", "cpu", "memory_mb", "pids", "disk_mb", "ttl_seconds"}
             raise ArgumentError.new("Unknown create field") unless input.keys.all? { |k| allowed.includes?(k) }
             raise ArgumentError.new("Provide exactly one of image or image_id") unless input.has_key?("image") != input.has_key?("image_id")
             command = input["command"].as_a.map(&.as_s)
             cpu = input["cpu"]?.try(&.as_i) || 1
             memory = input["memory_mb"]?.try(&.as_i) || 256
+            disk = input["disk_mb"]?.try(&.as_i) || 1024
             pids = input["pids"]?.try(&.as_i) || 128
             ttl = input["ttl_seconds"]?.try(&.as_i)
-            raise ArgumentError.new("Invalid command or resource limits") if command.empty? || command[0].empty? || !(1..64).includes?(cpu) || !(16..262144).includes?(memory) || !(1..65536).includes?(pids)
+            raise ArgumentError.new("Invalid command or resource limits") if !(16..1048576).includes?(disk) || command.empty? || command[0].empty? || !(1..64).includes?(cpu) || !(16..262144).includes?(memory) || !(1..65536).includes?(pids)
             raise ArgumentError.new("ttl_seconds must be positive") if ttl && ttl <= 0
             image_id = input["image_id"]?.try(&.as_s)
             image = if image_id
@@ -96,13 +115,18 @@ module Sandcube
                     else
                       input["image"].as_s
                     end
-            config = {id: id, image: image, image_id: image_id, command: command, cpu: cpu, memory_mb: memory, pids: pids}
+            config = {id: id, image: image, image_id: image_id, command: command, cpu: cpu, memory_mb: memory, disk_mb: disk, pids: pids}
             conn.exec("INSERT INTO sandboxes(id,config,intent,expires_at) VALUES($1,$2::jsonb,'create',$3)", id, config.to_json, ttl.try { |n| Time.utc + n.seconds })
+            @capacity.reserve(conn, id, cpu.to_i64, memory.to_i64, disk.to_i64)
           else
             row = get(conn, id)
             # Complete older accepted work before recording a new transition.
             raise ImageError.new(409, "LIFECYCLE_PENDING", "Previous operation is awaiting reconciliation") unless row["intent"].raw.nil? || action == "delete"
             raise ImageError.new(410, "SANDBOX_DELETED", "Sandbox was deleted") if row["status"].as_s == "deleted" && action != "delete"
+            if {"start", "restart"}.includes?(action)
+              config = row["config"]
+              @capacity.reserve(conn, id, config["cpu"].as_i64, config["memory_mb"].as_i64, config["disk_mb"].as_i64)
+            end
             state = {"start" => "starting", "stop" => "stopping", "restart" => "stopping", "delete" => "deleting"}[action]
             conn.exec("UPDATE sandboxes SET intent=$2,status=$3,updated_at=now() WHERE id=$1", id, action, state)
           end
@@ -141,6 +165,8 @@ module Sandcube
         status = intent == "delete" ? "deleted" : (intent == "stop" ? "stopped" : "running")
         conn.transaction do
           conn.exec("UPDATE sandboxes SET status=$2,intent=NULL,error_message=NULL,updated_at=now() WHERE id=$1", id, status)
+          conn.exec("UPDATE sandboxes SET reserved_cpu=0,reserved_memory_mb=0 WHERE id=$1", id) if {"stopped", "deleted"}.includes?(status)
+          conn.exec("UPDATE sandboxes SET reserved_disk_mb=0 WHERE id=$1", id) if status == "deleted"
           conn.exec("DELETE FROM sandbox_images WHERE sandbox_id=$1", id) if status == "deleted"
           conn.exec("UPDATE lifecycle_requests SET response=$2 WHERE sandbox_id=$1 AND response IS NULL", id, response(conn, id).to_json)
           count(conn, "lifecycle_completed")
@@ -188,6 +214,7 @@ module Sandcube
             begin
               actual = @runtime.request("GET", "/containers/#{id}")
               conn.exec("UPDATE sandboxes SET status=$2,error_message=NULL,updated_at=now() WHERE id=$1", id, actual["status"].as_s)
+              conn.exec("UPDATE sandboxes SET reserved_cpu=0,reserved_memory_mb=0 WHERE id=$1", id) if actual["status"].as_s == "stopped"
             rescue ex : RuntimeError
               raise ex unless ex.status == 404
               conn.exec("UPDATE sandboxes SET status='error',error_message='Runtime container missing',updated_at=now() WHERE id=$1", id)
@@ -235,8 +262,8 @@ module Sandcube
       {"running", "stopped", "error"}.each do |state|
         values["sandcube_sandboxes_#{state}"] = @db.query_one("SELECT count(*) FROM sandboxes WHERE status=$1", state, as: Int64)
       end
-      {"cpu", "memory_mb"}.each do |field|
-        values["sandcube_allocated_#{field}"] = @db.query_one("SELECT COALESCE(sum((config->>$1)::bigint),0)::bigint FROM sandboxes WHERE status='running'", field, as: Int64)
+      {"cpu", "memory_mb", "disk_mb"}.each do |field|
+        values["sandcube_allocated_#{field}"] = @db.query_one("SELECT COALESCE(sum(reserved_#{field}),0)::bigint FROM sandboxes", as: Int64)
       end
       output = values.map { |name, value| "#{name} #{value}\n" }.join
       begin

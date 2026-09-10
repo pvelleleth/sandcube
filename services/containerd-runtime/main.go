@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -26,17 +27,19 @@ import (
 var validID = regexp.MustCompile(`^sbx_[a-zA-Z0-9_-]{1,80}$`)
 
 type server struct {
-	backend Backend
-	locks   [256]sync.Mutex
+	backend   Backend
+	locks     [256]sync.Mutex
+	lifecycle sync.Mutex
 }
 
 func (s *server) lock(id string) func() {
+	s.lifecycle.Lock()
 	var h byte
 	for i := range id {
 		h = h*31 + id[i]
 	}
 	s.locks[h].Lock()
-	return s.locks[h].Unlock
+	return func() { s.locks[h].Unlock(); s.lifecycle.Unlock() }
 }
 func respond(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -117,7 +120,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			failure(w, 503, "UNAVAILABLE", errors.New("reconciliation unavailable"))
 			return
 		}
+		s.lifecycle.Lock()
 		value, err = b.Reconcile(ctx)
+		s.lifecycle.Unlock()
 	} else if r.Method == "POST" && len(parts) == 2 && parts[0] == "images" {
 		backend, ok := s.backend.(ImageBackend)
 		if !ok {
@@ -142,12 +147,12 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if r.Method == "POST" && r.URL.Path == "/containers" {
-		var c Config
+		c := Config{DiskMB: 1024}
 		if err = decode(w, r, &c); err != nil {
 			failure(w, 400, "INVALID_REQUEST", err)
 			return
 		}
-		if !validID.MatchString(c.ID) || c.Image == "" || len(c.Command) == 0 || c.Command[0] == "" || c.CPU < 1 || c.CPU > 64 || c.MemoryMB < 16 || c.MemoryMB > 262144 || c.Pids < 1 || c.Pids > 65536 {
+		if c.DiskMB < 16 || c.DiskMB > 1048576 || !validID.MatchString(c.ID) || c.Image == "" || len(c.Command) == 0 || c.Command[0] == "" || c.CPU < 1 || c.CPU > 64 || c.MemoryMB < 16 || c.MemoryMB > 262144 || c.Pids < 1 || c.Pids > 65536 {
 			failure(w, 400, "INVALID_REQUEST", errors.New("invalid ID, image, command or resource limits"))
 			return
 		}
@@ -263,7 +268,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errInvalidPath):
 			status = 400
 			code = "INVALID_PATH"
-		case errors.Is(err, errFileTooLarge), errdefs.IsResourceExhausted(err):
+		case errors.Is(err, unix.EDQUOT), errors.Is(err, unix.ENOSPC), errors.Is(err, errFileTooLarge), errdefs.IsResourceExhausted(err):
 			status = 413
 			code = "LIMIT_EXCEEDED"
 		case errors.Is(err, unix.ENOENT):
@@ -356,8 +361,25 @@ func main() {
 		log.Fatal(e)
 	}
 	runtime := &Runtime{client: client, namespace: *namespace, configPath: *configPath, buildRoot: *buildRoot, stateRoot: *stateRoot, historyRoot: filepath.Join(*historyRoot, *namespace)}
+	var hierarchy unix.Statfs_t
+	if e := unix.Statfs("/sys/fs/cgroup", &hierarchy); e != nil || hierarchy.Type != unix.CGROUP2_SUPER_MAGIC {
+		log.Fatal("cgroup v2 is required for memory, swap and group OOM enforcement")
+	}
+	// Host forwarding is provisioned by the operator; never silently alter host policy.
+	forwarding, e := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
+	if e != nil || strings.TrimSpace(string(forwarding)) != "1" {
+		log.Fatal("IPv4 forwarding must be enabled")
+	}
+	for _, tool := range []string{"ip", "nft", "sysctl", "conntrack"} {
+		if _, e := exec.LookPath(tool); e != nil {
+			log.Fatal(e)
+		}
+	}
 	// Fail closed if inventory/history cannot be read; do not report invented exits.
 	if err = runtime.recoverProcesses(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+	if _, err = runtime.Reconcile(context.Background()); err != nil {
 		log.Fatal(err)
 	}
 	old := syscall.Umask(0077)

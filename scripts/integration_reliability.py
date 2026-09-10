@@ -145,13 +145,13 @@ with tempfile.TemporaryDirectory(prefix='sc-p4-') as work:
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
-    env = dict(os.environ, DATABASE_URL=DATABASE, SANDCUBE_RUNTIME_SOCKET=proxy_socket, SANDCUBE_API_KEY=TOKEN, SANDCUBE_PORT=str(port), SANDCUBE_RECONCILE_SECONDS='1')
+    env = dict(os.environ, DATABASE_URL=DATABASE, SANDCUBE_RUNTIME_SOCKET=proxy_socket, SANDCUBE_API_KEY=TOKEN, SANDCUBE_PORT=str(port), SANDCUBE_RECONCILE_SECONDS='1', SANDCUBE_CAPACITY_CPU='2', SANDCUBE_CAPACITY_MEMORY_MB='512', SANDCUBE_CAPACITY_DISK_MB='256')
     proxy = UnixServer(proxy_socket, Proxy)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
     with open(work + '/services.log', 'w+') as log:
         try:
             restart()
-            body = {'image': IMAGE, 'command': ['/bin/sleep', 'infinity']}
+            body = {'image': IMAGE, 'command': ['/bin/sleep', 'infinity'], 'disk_mb':32}
             for after in (False, True):
                 for action in ('create', 'start', 'stop', 'delete'):
                     key = secrets.token_hex(12)
@@ -178,7 +178,7 @@ with tempfile.TemporaryDirectory(prefix='sc-p4-') as work:
                     result = api(method, path, payload, key, expected)
                     assert result['status'] == {'create': 'running', 'start': 'running', 'stop': 'stopped', 'delete': 'deleted'}[action]
                     assert api(method, path, payload, key, expected) == result
-                    api('POST', '/v1/sandboxes', {'image': IMAGE, 'command': ['/bin/true']}, key, 409)
+                    api('POST', '/v1/sandboxes', {'image': IMAGE, 'command': ['/bin/true'], 'disk_mb':32}, key, 409)
                     api('DELETE', '/v1/sandboxes/' + result['id'])
                     print(f'PASS: SIGKILL {"after" if after else "before"} {action}, convergence and stable retry', flush=True)
             # Concurrent creates return one identity, including retries after service death.
@@ -264,6 +264,9 @@ with tempfile.TemporaryDirectory(prefix='sc-p4-') as work:
             assert IMAGE in ctr('images','list','-q')
             assert not ctr('containers','list','-q').strip()
             print('PASS: metrics, running/stopped TTL, orphan cleanup, reusable image preserved', flush=True)
+            if os.environ.get('SANDCUBE_PHASE5') == '1':
+                from phase5_checks import check_phase5
+                check_phase5(globals())
         except BaseException:
             log.flush();log.seek(0);print(log.read()[-16000:])
             raise
@@ -278,3 +281,15 @@ with tempfile.TemporaryDirectory(prefix='sc-p4-') as work:
                 subprocess.run(['ctr','--address',ADDRESS,'-n',NS,'tasks','delete',sid],capture_output=True)
                 subprocess.run(['ctr','--address',ADDRESS,'-n',NS,'containers','delete',sid],capture_output=True)
                 subprocess.run(['ctr','--address',ADDRESS,'-n',NS,'snapshots','remove',sid],capture_output=True)
+            # Emergency teardown for failed assertions/fault injection. Success
+            # is asserted by the tests before this fallback; it never masks a failure.
+            import hashlib
+            for record in (Path(work)/'history'/NS/'.networks').glob('*.json'):
+                n = json.loads(record.read_text())
+                expected_name = 'scn' + hashlib.sha256((NS+'/'+n['ID']).encode()).hexdigest()[:12]
+                assert n['Name'] == expected_name
+                subprocess.run(['ip','link','delete',n['Name']],capture_output=True)
+                subprocess.run(['ip','netns','delete',n['Name']],capture_output=True)
+                subprocess.run(['nft','delete','table','inet',n['Name']],capture_output=True)
+                if __import__('shutil').which('conntrack'):
+                    subprocess.run(['conntrack','-D','-f','ipv4','--orig-src',n['Guest']],capture_output=True)

@@ -125,6 +125,12 @@ func (r *Runtime) Reconcile(ctx context.Context) (any, error) {
 			return nil, e
 		}
 	}
+	if err = r.reconcileQuotas(ctx); err != nil {
+		return nil, err
+	}
+	if err = r.reconcileNetworks(ctx); err != nil {
+		return nil, err
+	}
 	return map[string]any{"snapshots_cleaned": len(keys)}, nil
 }
 func (r *Runtime) processDir(id, pid string) string { return filepath.Join(r.historyRoot, id, pid) }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,6 +36,7 @@ type Config struct {
 	Image    string   `json:"image"`
 	Command  []string `json:"command"`
 	CPU      int64    `json:"cpu"`
+	DiskMB   int64    `json:"disk_mb"`
 	MemoryMB int64    `json:"memory_mb"`
 	Pids     int64    `json:"pids"`
 }
@@ -131,6 +133,9 @@ func (r *Runtime) Create(ctx context.Context, cfg Config) (Sandbox, error) {
 	} else if e != nil && !errdefs.IsNotFound(e) {
 		return Sandbox{}, e
 	}
+	if err := r.reclaimQuota(ctx, cfg.ID); err != nil {
+		return Sandbox{}, err
+	}
 	img, err := r.client.GetImage(ctx, cfg.Image)
 	if err != nil {
 		return Sandbox{}, err
@@ -140,18 +145,26 @@ func (r *Runtime) Create(ctx context.Context, cfg Config) (Sandbox, error) {
 	_, err = r.client.NewContainer(ctx, cfg.ID,
 		containerd.WithImage(img), containerd.WithSnapshotter("overlayfs"),
 		containerd.WithRuntime(runtimeName, &runtimeoptions.Options{ConfigPath: r.configPath}),
-		containerd.WithContainerLabels(map[string]string{ownerLabel: "true", "sandcube.config": fingerprint}),
+		containerd.WithContainerLabels(map[string]string{ownerLabel: "true", "sandcube.config": fingerprint, "sandcube.disk_mb": strconv.FormatInt(cfg.DiskMB, 10)}),
 		func(ctx context.Context, client *containerd.Client, c *containers.Container) error {
 			err := containerd.WithNewSnapshot(cfg.ID, img, snapshots.WithLabels(map[string]string{ownerLabel: "true"}))(ctx, client, c)
 			snapshotCreated = err == nil
-			return err
+			if err != nil {
+				return err
+			}
+			ms, err := client.SnapshotService("overlayfs").Mounts(ctx, cfg.ID)
+			if err != nil {
+				return err
+			}
+			return r.prepareQuota(ctx, cfg.ID, cfg.DiskMB, ms)
 		},
 		containerd.WithNewSpec(oci.WithImageConfig(img), oci.WithProcessArgs(cfg.Command...),
 			// runsc shim requires explicit sandbox identity to wire init IO correctly.
 			oci.WithAnnotations(map[string]string{"io.kubernetes.cri.container-type": "sandbox", "io.kubernetes.cri.sandbox-id": cfg.ID}),
-			oci.WithMemoryLimit(uint64(cfg.MemoryMB)*1024*1024), oci.WithCPUCFS(cfg.CPU*100000, 100000),
-			oci.WithPidsLimit(cfg.Pids), oci.WithCapabilities([]string{}), oci.WithNoNewPrivileges,
-			oci.WithLinuxNamespace(specs.LinuxNamespace{Type: specs.NetworkNamespace}),
+			oci.WithMemoryLimit(uint64(cfg.MemoryMB)*1024*1024), oci.WithMemorySwap(cfg.MemoryMB*1024*1024), oci.WithCPUCFS(cfg.CPU*100000, 100000),
+			oci.WithMounts([]specs.Mount{{Destination: "/etc/resolv.conf", Type: "bind", Source: r.resolverPath(cfg.ID), Options: []string{"bind", "ro", "nosuid", "nodev", "noexec"}}}),
+			withOOMGroup, oci.WithPidsLimit(cfg.Pids), oci.WithCapabilities([]string{}), oci.WithNoNewPrivileges,
+			oci.WithLinuxNamespace(specs.LinuxNamespace{Type: specs.NetworkNamespace, Path: r.networkPath(cfg.ID)}),
 		),
 	)
 	if err != nil {
@@ -218,6 +231,12 @@ func (r *Runtime) Start(ctx context.Context, id string) (Sandbox, error) {
 	} else if !errdefs.IsNotFound(err) {
 		return Sandbox{}, err
 	}
+	if err = r.checkQuota(ctx, id); err != nil {
+		return Sandbox{}, err
+	}
+	if err = r.setupNetwork(ctx, id); err != nil {
+		return Sandbox{}, err
+	}
 	t, err = c.NewTask(ctx, cio.NullIO)
 	if err != nil {
 		return Sandbox{}, err
@@ -240,6 +259,9 @@ func (r *Runtime) Stop(ctx context.Context, id string) (Sandbox, error) {
 	}
 	t, err := c.Task(ctx, nil)
 	if errdefs.IsNotFound(err) {
+		if err = r.removeNetwork(ctx, id); err != nil {
+			return Sandbox{}, err
+		}
 		return r.describe(ctx, c)
 	}
 	if err != nil {
@@ -268,6 +290,9 @@ func (r *Runtime) Stop(ctx context.Context, id string) (Sandbox, error) {
 		return Sandbox{}, err
 	}
 	if err = r.settleProcesses(ctx, id); err != nil {
+		return Sandbox{}, err
+	}
+	if err = r.removeNetwork(ctx, id); err != nil {
 		return Sandbox{}, err
 	}
 	return r.describe(ctx, c)
@@ -315,7 +340,13 @@ func (r *Runtime) Delete(ctx context.Context, id string) error {
 		} else if e != nil && !errdefs.IsNotFound(e) {
 			return e
 		}
+		if err = r.reclaimQuota(ctx, id); err != nil {
+			return err
+		}
 		if err = r.settleProcesses(ctx, id); err != nil {
+			return err
+		}
+		if err = r.removeNetwork(ctx, id); err != nil {
 			return err
 		}
 		return r.forgetProcesses(id)
@@ -327,6 +358,9 @@ func (r *Runtime) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	if err = c.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
+		return err
+	}
+	if err = r.reclaimQuota(ctx, id); err != nil {
 		return err
 	}
 	return r.forgetProcesses(id)
@@ -444,4 +478,11 @@ func mergeEnv(base []string, overrides map[string]string) []string {
 		result = append(result, key+"="+values[key])
 	}
 	return result
+}
+
+// Kill the whole task cgroup on OOM. Killing only a gofer/helper can leave a
+// nominally running sandbox with a broken filesystem and retained compute.
+func withOOMGroup(_ context.Context, _ oci.Client, _ *containers.Container, spec *specs.Spec) error {
+	spec.Linux.Resources.Unified = map[string]string{"memory.oom.group": "1"}
+	return nil
 }

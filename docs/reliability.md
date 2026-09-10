@@ -1,6 +1,6 @@
 # Phase 4 — Reliability
 
-Set `DATABASE_URL` to enable the PostgreSQL sandbox journal, lifecycle request deduplication, reconciliation, TTL and `/metrics`. Migrations run at startup. The database pool must allow at least two connections (the default is unlimited). A transaction pins the advisory lock connection; separate transactions commit journal changes before runtime IO. This also permits transaction-mode database poolers in production. Database specs use a direct connection because their isolated schemas rely on session search paths.
+The production service requires `DATABASE_URL` for the PostgreSQL sandbox journal, lifecycle request deduplication, reconciliation, TTL and `/metrics`. Migrations run at startup. The database pool must allow at least two connections (the default is unlimited). A transaction pins the advisory lock connection; separate transactions commit journal changes before runtime IO. This also permits transaction-mode database poolers in production. Database specs use a direct connection because their isolated schemas rely on session search paths.
 
 Only one API instance may own image builds. Additional lifecycle API instances must set `SANDCUBE_IMAGE_API_ENABLED=false`; this disables their image endpoints and interrupted-build recovery while preserving image reservations for sandbox creation.
 
@@ -24,7 +24,7 @@ Send `Idempotency-Key` with sandbox create/start/stop/restart/delete. Use 1–20
 
 Detached process creation and synchronous exec also accept `Idempotency-Key`. These keys are scoped to the sandbox and endpoint and identify a durable process record. Matching retries return that process or its result; changed command/options return 409. A process whose start was interrupted is reported as an error rather than executed again. Process retry records expire with sandbox deletion. File and image submission requests do not provide keyed replay guarantees.
 
-Without `DATABASE_URL`, the earlier runtime-only mode remains available for the Phase 1–3 harness: it has no lifecycle journal, TTL or lifecycle request deduplication. Durable process capture is still enabled in the adapter.
+Phase 5 removes production runtime-only mode: all acceptance harnesses now require a dedicated `TEST_DATABASE_URL`. See [resource budgets and XFS/network prerequisites](resources-networking.md).
 
 ## Processes and logs
 
@@ -38,7 +38,7 @@ Deletion/TTL removes only that sandbox's snapshots and process history/logs. Sto
 
 Create accepts positive `ttl_seconds`. Expiration uses PostgreSQL time and applies to running and stopped sandboxes. Expiration supersedes pending startup work and follows the same retryable deletion path. Reusable image reservations are released only after runtime deletion succeeds. Image objects and base layers are not TTL targets.
 
-Authenticated `GET /metrics` returns Prometheus text with durable lifecycle/cleanup/reconciliation counters, sandbox state counts, allocated CPU/memory, runtime request failures and duration, per-sandbox CPU/memory/snapshot usage, process counts, and process-history disk usage. `sandcube_runtime_up` and `sandcube_resource_scrape_errors` distinguish unavailable measurements from zero usage. Runtime request counters reset with adapter restart; journal counters persist in PostgreSQL. Lifecycle and adapter events are JSON and include IDs, durations or failure details.
+Authenticated `GET /metrics` returns Prometheus text with durable lifecycle/cleanup/reconciliation counters, sandbox state counts, reserved CPU/memory/disk, runtime request failures and duration, per-sandbox CPU/memory/snapshot usage, process counts, and process-history disk usage. `sandcube_runtime_up` and `sandcube_resource_scrape_errors` distinguish unavailable measurements from zero usage. Runtime request counters reset with adapter restart; journal counters persist in PostgreSQL. Lifecycle and adapter events are JSON and include IDs, durations or failure details.
 
 ## Verification
 

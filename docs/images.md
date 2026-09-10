@@ -27,7 +27,7 @@ API configuration:
 | `SANDCUBE_BUILDKIT_ADDRESS` | `unix:///run/buildkit/buildkitd.sock` |
 | `SANDCUBE_BUILDCTL` | `buildctl`, executable path |
 
-Pass the same build directory to the adapter with `-build-root`. The adapter and API must have filesystem access to it. Existing runtime/API configuration is unchanged. Without `DATABASE_URL`, Phase 1 raw OCI image creation remains available, and image routes return `503 IMAGES_UNAVAILABLE`.
+Pass the same build directory to the adapter with `-build-root`. The adapter and API must have filesystem access to it. Phase 5 requires `DATABASE_URL` for all production operation, including raw OCI sandbox creation, plus [capacity budgets and XFS/network prerequisites](resources-networking.md).
 
 ## API
 
