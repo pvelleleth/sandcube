@@ -21,7 +21,6 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE = 'docker.io/library/busybox:1.37.0'
 NAMESPACE = 'sandcube-test'
 ADDRESS = os.environ.get('SANDCUBE_CONTAINERD', '/run/sandcube-containerd/containerd.sock')
-TOKEN = secrets.token_hex(32)
 ids = []
 processes = []
 baseline = set()
@@ -34,12 +33,12 @@ def ctr(*args, check=True):
     return subprocess.run(['ctr', '--address', ADDRESS, '-n', NAMESPACE, *args], text=True, capture_output=True, check=check)
 
 
-def api(method, path, body=None, expected=200, token=TOKEN):
+def api(method, path, body=None, expected=200):
     if method == 'POST' and path == '/v1/sandboxes' and isinstance(body, dict):
         body = dict(body, disk_mb=body.get('disk_mb', 64))
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method,
-        headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+        headers={'Content-Type': 'application/json'})
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
             code, raw = response.status, response.read()
@@ -75,17 +74,14 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
-    env = dict(os.environ, DATABASE_URL=os.environ['TEST_DATABASE_URL'], SANDCUBE_CAPACITY_CPU='2', SANDCUBE_CAPACITY_MEMORY_MB='512', SANDCUBE_CAPACITY_DISK_MB='256', SANDCUBE_RUNTIME_SOCKET=sock, SANDCUBE_API_KEY=TOKEN, SANDCUBE_PORT=str(port))
+    env = dict(os.environ, SANDCUBE_DATA_DIR=work + '/data', SANDCUBE_CAPACITY_CPU='2', SANDCUBE_CAPACITY_MEMORY_MB='512', SANDCUBE_CAPACITY_DISK_MB='256', SANDCUBE_RUNTIME_SOCKET=sock, SANDCUBE_PORT=str(port))
     baseline = set(ctr('containers', 'list', '-q').stdout.split())
     assert not baseline, 'Use an empty dedicated test namespace'
-    def sql(query):
-        return subprocess.run(['psql', env['DATABASE_URL'], '-v', 'ON_ERROR_STOP=1', '-At'],input=query,text=True,capture_output=True,check=True).stdout.strip()
-    assert not sql("SELECT to_regclass('public.sandboxes')") or sql("SELECT count(*) FROM sandboxes WHERE status!='deleted'") == '0', 'Use a dedicated test database'
 
     with open(work + '/services.log', 'w+') as log:
         try:
             adapter = start('containerd-runtime', ['-socket', sock, '-containerd', ADDRESS, '-namespace', NAMESPACE, '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml'), '-history-root', work + '/history'], env, log)
-            crystal = start('sandcube', [], env, log)
+            crystal = start('sandcube-api', [], env, log)
             for _ in range(100):
                 try:
                     if not os.path.exists(sock):
@@ -99,14 +95,14 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
             else:
                 raise RuntimeError('Services did not become healthy')
             assert os.stat(sock).st_mode & 0o777 == 0o600
-            api('GET', '/health', expected=401, token='wrong')
-            print('PASS: authenticated API and private Unix socket', flush=True)
+            api('GET', '/health')
+            print('PASS: API without authentication and private Unix socket', flush=True)
             before_failed_create = set(ctr('containers', 'list', '-q').stdout.split())
             before_failed_snapshots = ctr('snapshots', 'list').stdout
             api('POST', '/v1/sandboxes', {'image': IMAGE, 'command': ['/does-not-exist']}, expected=500)
             assert set(ctr('containers', 'list', '-q').stdout.split()) == before_failed_create
             assert ctr('snapshots', 'list').stdout == before_failed_snapshots
-            api('POST', '/v1/sandboxes', {'image': 'missing-image', 'command': ['/bin/true']}, expected=404)
+            api('POST', '/v1/sandboxes', {'image': 'sandcube.local/images/missing:latest', 'command': ['/bin/true']}, expected=404)
             print('PASS: failed creation rolls back container and snapshot', flush=True)
             for _ in range(2):
                 sb = api('POST', '/v1/sandboxes', {'image': IMAGE, 'command': ['/bin/sleep', 'infinity']}, expected=201)
@@ -116,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
             def reconnect_api():
                 global crystal
                 stop(crystal)
-                crystal = start('sandcube', [], env, log)
+                crystal = start('sandcube-api', [], env, log)
                 for _ in range(100):
                     try:
                         api('GET', '/health')
@@ -124,7 +120,7 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
                     except (OSError, AssertionError):
                         time.sleep(.1)
                 raise RuntimeError('API did not restart')
-            check_phase3(api, execute, base, TOKEN, sid, other, reconnect_api)
+            check_phase3(api, execute, base, sid, other, reconnect_api)
             prefix = f'/v1/sandboxes/{sid}'
             info = json.loads(ctr('containers', 'info', sid).stdout)
             assert info['Runtime']['Name'] == 'io.containerd.runsc.v1', info
@@ -167,7 +163,7 @@ with tempfile.TemporaryDirectory(prefix='sandcube-test-') as work:
             stop(crystal)
             stop(adapter)
             adapter = start('containerd-runtime', ['-socket', sock, '-containerd', ADDRESS, '-namespace', NAMESPACE, '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml'), '-history-root', work + '/history'], env, log)
-            crystal = start('sandcube', [], env, log)
+            crystal = start('sandcube-api', [], env, log)
             for _ in range(100):
                 try:
                     if not os.path.exists(sock):

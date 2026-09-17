@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+.tools
+bin
+dist
+lib
+__pycache__
+**/__pycache__
+.sandcube-spec-*
+*.log

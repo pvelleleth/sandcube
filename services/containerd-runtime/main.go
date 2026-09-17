@@ -74,7 +74,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/exec") {
 		timeout = time.Hour + 30*time.Second
 	}
-	if r.URL.Path == "/images/import" {
+	if r.URL.Path == "/images/import" || (r.Method == "POST" && r.URL.Path == "/containers") {
 		timeout = 10 * time.Minute
 	}
 	if r.URL.Path == "/health" {

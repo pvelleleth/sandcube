@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Phase 2: real PostgreSQL -> Crystal -> BuildKit -> containerd -> gVisor.
-Requires a dedicated TEST_DATABASE_URL, running BuildKit/containerd, and built binaries.
+"""Phase 2: real SQLite -> Crystal -> BuildKit -> containerd -> gVisor.
+Requires running BuildKit/containerd and built binaries; creates temporary SQLite state.
 Cleans only its own sandboxes/images; preserves metadata tombstones for inspection.
 """
 import base64
@@ -21,8 +21,6 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESS = os.environ.get('SANDCUBE_CONTAINERD', '/run/sandcube-containerd/containerd.sock')
-DATABASE = os.environ['TEST_DATABASE_URL']
-TOKEN = secrets.token_hex(32)
 NAMESPACE = 'sandcube-test'
 images, sandboxes, processes = [], [], []
 lock = (ROOT / '.integration.lock').open('a')
@@ -34,7 +32,7 @@ def api(method, path, body=None, expected=200, content_type='application/json'):
         body = dict(body, disk_mb=body.get('disk_mb', 64))
     data = body if isinstance(body, bytes) else json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method,
-        headers={'Authorization': 'Bearer ' + TOKEN, 'Content-Type': content_type})
+        headers={'Content-Type': content_type})
     try:
         with urllib.request.urlopen(req, timeout=90) as r:
             code, raw = r.status, r.read()
@@ -120,9 +118,6 @@ def ctr(*args, check=True):
 
 
 assert not ctr('containers', 'list', '-q').stdout.strip(), 'Use an empty dedicated test namespace'
-def sql(query):
-    return subprocess.run(['psql', DATABASE, '-v', 'ON_ERROR_STOP=1', '-At'],input=query,text=True,capture_output=True,check=True).stdout.strip()
-assert not sql("SELECT to_regclass('public.sandboxes')") or sql("SELECT count(*) FROM sandboxes WHERE status!='deleted'") == '0', 'Use a dedicated test database'
 
 with tempfile.TemporaryDirectory(prefix='sc-images-') as work:
     root = Path(work) / 'builds'
@@ -131,13 +126,13 @@ with tempfile.TemporaryDirectory(prefix='sc-images-') as work:
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
-    env = dict(os.environ, DATABASE_URL=DATABASE, SANDCUBE_CAPACITY_CPU='2', SANDCUBE_CAPACITY_MEMORY_MB='512', SANDCUBE_CAPACITY_DISK_MB='256', SANDCUBE_RUNTIME_SOCKET=sock, SANDCUBE_API_KEY=TOKEN,
+    env = dict(os.environ, SANDCUBE_DATA_DIR=work + '/data', SANDCUBE_CAPACITY_CPU='2', SANDCUBE_CAPACITY_MEMORY_MB='512', SANDCUBE_CAPACITY_DISK_MB='256', SANDCUBE_RUNTIME_SOCKET=sock,
         SANDCUBE_PORT=str(port), SANDCUBE_BUILD_ROOT=str(root))
     with open(work + '/services.log', 'w+') as log:
         try:
             adapter = start('containerd-runtime', ['-socket', sock, '-containerd', ADDRESS, '-namespace', NAMESPACE,
                 '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml'), '-build-root', str(root), '-history-root', work + '/history'], env, log)
-            service = start('sandcube', [], env, log)
+            service = start('sandcube-api', [], env, log)
             health()
             # Includes RUN package installation, COPY, ARG, ENV, and WORKDIR semantics.
             dockerfile = '''FROM alpine:3.22
@@ -157,7 +152,7 @@ RUN echo built > /workspace/build-marker
             # Break the buildctl command after building: later creations must not invoke it.
             stop(service)
             env['SANDCUBE_BUILDCTL'] = '/does-not-exist-buildctl'
-            service = start('sandcube', [], env, log)
+            service = start('sandcube-api', [], env, log)
             health()
             assert api('GET', '/v1/images/' + iid)['oci_digest'] == ready['oci_digest']
             for _ in range(2):
@@ -187,7 +182,7 @@ RUN echo built > /workspace/build-marker
 
             stop(service)
             env['SANDCUBE_BUILDCTL'] = os.environ.get('SANDCUBE_BUILDCTL', 'buildctl')
-            service = start('sandcube', [], env, log)
+            service = start('sandcube-api', [], env, log)
             health()
             failed = submit('FROM alpine:3.22\nRUN echo intentional-failure >&2; exit 23\n')
             failure = wait_image(failed, 'ERROR')

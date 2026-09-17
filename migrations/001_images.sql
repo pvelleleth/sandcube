@@ -5,8 +5,8 @@ CREATE TABLE IF NOT EXISTS images (
   oci_reference text NOT NULL UNIQUE,
   oci_digest text,
   dockerfile text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   error_message text
 );
 -- Reservations precede runtime creation and survive failed rollback/restarts.

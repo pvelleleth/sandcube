@@ -1,12 +1,15 @@
 CREATE TABLE IF NOT EXISTS sandboxes (
   id text PRIMARY KEY,
-  config jsonb NOT NULL,
+  config text NOT NULL,
   status text NOT NULL DEFAULT 'creating',
   intent text,
-  expires_at timestamptz,
+  expires_at text,
   error_message text,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now()
+  reserved_cpu integer NOT NULL DEFAULT 0,
+  reserved_memory_mb integer NOT NULL DEFAULT 0,
+  reserved_disk_mb integer NOT NULL DEFAULT 0,
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS sandboxes_expiration ON sandboxes(expires_at) WHERE status != 'deleted';
 CREATE TABLE IF NOT EXISTS lifecycle_requests (
@@ -16,11 +19,9 @@ CREATE TABLE IF NOT EXISTS lifecycle_requests (
   action text NOT NULL,
   response text,
   response_status integer NOT NULL DEFAULT 200,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at text NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 CREATE TABLE IF NOT EXISTS reliability_counters (
   name text PRIMARY KEY,
   value bigint NOT NULL DEFAULT 0
 );
-
-ALTER TABLE lifecycle_requests ADD COLUMN IF NOT EXISTS response_status integer NOT NULL DEFAULT 200;

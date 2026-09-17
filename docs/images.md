@@ -4,9 +4,9 @@ The Crystal API owns image state and build orchestration. `buildctl` builds a lo
 
 ## Setup
 
-Install PostgreSQL, `shards`, and the official [BuildKit binaries](https://github.com/moby/buildkit/releases). Run `shards install` and `make build`. The API applies the additive, idempotent migration in `migrations/001_images.sql` when `DATABASE_URL` is configured. Use a database dedicated to this service.
+Use `sandcube init`, then `sandcube serve`. The CLI installs and supervises BuildKit/CNI and creates image metadata in local SQLite automatically. For source development, install SQLite development libraries, `shards`, and the official [BuildKit binaries](https://github.com/moby/buildkit/releases), then run `make build`.
 
-Run **one image-enabled API instance per database/namespace** (additional lifecycle-only instances set `SANDCUBE_IMAGE_API_ENABLED=false`), using a private build directory shared with the runtime adapter. The API holds an exclusive lock on this directory. Run BuildKit separately with its private Unix socket, process isolation, and an isolated bridge/CNI network. Do not enable `security.insecure`, `network.host`, device entitlements, or `--oci-worker-no-process-sandbox`. Builds receive only their uploaded context and build arguments; registry credentials, SSH agents, secret mounts, and host environment variables are not forwarded.
+Run one API instance per data directory/namespace, using a private build directory shared with the runtime adapter. The API holds exclusive lifetime locks. For manual development, run BuildKit with its private Unix socket, process isolation, and an isolated bridge/CNI network. Do not enable `security.insecure`, `network.host`, device entitlements, or `--oci-worker-no-process-sandbox`. Builds receive only their uploaded context and build arguments; registry credentials, SSH agents, secret mounts, and host environment variables are not forwarded.
 
 For the bundled BuildKit release (v0.33.0), the following uses its built-in bridge networking and bundled `buildkit-cni-*` helpers (put the release's `bin` directory on PATH):
 
@@ -22,20 +22,19 @@ API configuration:
 
 | Variable | Default / meaning |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection URL; required for images |
+| `SANDCUBE_DATA_DIR` | Local directory containing `sandcube.db` |
 | `SANDCUBE_BUILD_ROOT` | `/var/lib/sandcube/builds`, mode 0700 |
 | `SANDCUBE_BUILDKIT_ADDRESS` | `unix:///run/buildkit/buildkitd.sock` |
 | `SANDCUBE_BUILDCTL` | `buildctl`, executable path |
 
-Pass the same build directory to the adapter with `-build-root`. The adapter and API must have filesystem access to it. Phase 5 requires `DATABASE_URL` for all production operation, including raw OCI sandbox creation, plus [capacity budgets and XFS/network prerequisites](resources-networking.md).
+For manual development, pass the same build directory to the adapter with `-build-root`. The adapter and API must have filesystem access to it. The CLI configures this automatically, along with [capacity budgets and XFS/network prerequisites](resources-networking.md).
 
 ## API
 
-All routes require the existing Bearer API key. Submit JSON for a Dockerfile without context:
+Routes require no API key. Submit JSON for a Dockerfile without context:
 
 ```sh
-curl -sS http://127.0.0.1:8080/v1/images \
-  -H "Authorization: Bearer $SANDCUBE_API_KEY" \
+curl -sS http://127.0.0.1:7432/v1/images \
   -H 'Content-Type: application/json' \
   -d '{"name":"tools","dockerfile":"FROM alpine:3.22\nRUN apk add --no-cache curl\nWORKDIR /workspace","build_args":{}}'
 ```
@@ -44,8 +43,7 @@ For an uploaded context:
 
 ```sh
 tar --format=ustar -czf context.tar.gz -C context .
-curl -sS http://127.0.0.1:8080/v1/images \
-  -H "Authorization: Bearer $SANDCUBE_API_KEY" \
+curl -sS http://127.0.0.1:7432/v1/images \
   -F 'name=tools' -F 'dockerfile=<Dockerfile' \
   -F 'context=@context.tar.gz' -F 'build_args={"VERSION":"example"}'
 ```
@@ -57,15 +55,14 @@ The response is **202 Accepted** with `id: img_...` and `status: BUILDING`. Poll
 Create any number of sandboxes from a READY ID:
 
 ```sh
-curl -sS http://127.0.0.1:8080/v1/sandboxes \
-  -H "Authorization: Bearer $SANDCUBE_API_KEY" \
+curl -sS http://127.0.0.1:7432/v1/sandboxes \
   -H 'Content-Type: application/json' \
   -d '{"image_id":"img_REPLACE_ME","command":["/bin/sleep","infinity"]}'
 ```
 
 The existing explicit long-running `command` requirement remains: choose an executable present in your image. Provide exactly one of `image_id` or the Phase 1 `image` reference. Create/inspect responses include `image_id` for managed images. A missing ID returns 404; an image that is not READY returns 409.
 
-`DELETE /v1/images/:id` refuses BUILDING images and returns `409 IMAGE_IN_USE` for images referenced by any sandbox, including stopped sandboxes and incomplete creations. Delete those sandboxes first. PostgreSQL row locks serialize reservations against deletion; the adapter independently checks container references. Successful image deletion leaves a DELETED metadata tombstone and is idempotent. Unknown IDs return 404. Containerd garbage collection preserves content shared with other images and snapshots. BuildKit's own build cache is managed separately by BuildKit GC.
+`DELETE /v1/images/:id` refuses BUILDING images and returns `409 IMAGE_IN_USE` for images referenced by any sandbox, including stopped sandboxes and incomplete creations. Delete those sandboxes first. SQLite transactions on the serialized database connection serialize reservations against deletion; the adapter independently checks container references. Successful image deletion leaves a DELETED metadata tombstone and is idempotent. Unknown IDs return 404. Containerd garbage collection preserves content shared with other images and snapshots. BuildKit's own build cache is managed separately by BuildKit GC.
 
 ## Limits and recovery
 
@@ -78,12 +75,10 @@ On API startup, interrupted BUILDING records become ERROR and abandoned build di
 ## Verification
 
 ```sh
-# Specs use temporary schemas in TEST_DATABASE_URL, falling back to DATABASE_URL.
-# The database role needs CREATE SCHEMA permission.
-DATABASE_URL=postgres://... make test
+# Specs use fresh temporary SQLite databases.
+make test
 
-# Acceptance requires a dedicated test database plus containerd, BuildKit and gVisor.
-TEST_DATABASE_URL=postgres://... \
+# Acceptance requires containerd, BuildKit and gVisor.
 SANDCUBE_BUILDKIT_ADDRESS=unix:///run/sandcube-buildkit/buildkitd.sock \
 make integration-images
 ```

@@ -137,10 +137,17 @@ func (r *Runtime) Create(ctx context.Context, cfg Config) (Sandbox, error) {
 		return Sandbox{}, err
 	}
 	img, err := r.client.GetImage(ctx, cfg.Image)
+	if errdefs.IsNotFound(err) && !strings.HasPrefix(cfg.Image, "sandcube.local/") {
+		img, err = r.client.Pull(ctx, cfg.Image, containerd.WithPullUnpack, containerd.WithPullSnapshotter("overlayfs"))
+	}
 	if err != nil {
 		return Sandbox{}, err
 	}
-	// Images must already be unpacked by the operator. No registry credentials or pulls here.
+	// Also unpack cached images imported without snapshots. Public registry images
+	// are fetched on first use; managed images are supplied by the image builder.
+	if err := img.Unpack(ctx, "overlayfs"); err != nil {
+		return Sandbox{}, err
+	}
 	snapshotCreated := false
 	_, err = r.client.NewContainer(ctx, cfg.ID,
 		containerd.WithImage(img), containerd.WithSnapshotter("overlayfs"),

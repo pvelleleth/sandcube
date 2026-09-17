@@ -1,0 +1,32 @@
+[Unit]
+Description=Sandcube sandbox service
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/var/lib/sandcube/config.env
+RequiresMountsFor=/var/lib/sandcube
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+# The runtime manages mounts, network namespaces, cgroups and XFS quotas.
+User=root
+Group=root
+Environment=PATH=/usr/local/lib/sandcube/deps/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/sandcube serve
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=sandcube
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StateDirectory=sandcube
+StateDirectoryMode=0700
+UMask=0077
+Delegate=yes
+# Signal the supervisor first. Kill remaining service processes only on timeout.
+KillMode=mixed
+TimeoutStopSec=90
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

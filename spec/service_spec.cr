@@ -14,23 +14,21 @@ class FakeRuntime < Sandcube::Runtime
   end
 end
 
-KEY = "test-key-012345678901234567890123456789"
-
-def request(runtime, method, path, body = nil, auth = "Bearer #{KEY}")
+def request(runtime, method, path, body = nil)
   io = IO::Memory.new
-  headers = HTTP::Headers{"Authorization" => auth}
+  headers = HTTP::Headers.new
   req = HTTP::Request.new(method, path, headers, body)
   response = HTTP::Server::Response.new(io)
-  Sandcube::Service.new(runtime, KEY).call(HTTP::Server::Context.new(req, response))
+  Sandcube::Service.new(runtime).call(HTTP::Server::Context.new(req, response))
   response.close
   HTTP::Client::Response.from_io(IO::Memory.new(io.to_s))
 end
 
 describe Sandcube::Service do
-  it "rejects unauthenticated requests before touching the runtime" do
+  it "accepts requests without API key authentication" do
     runtime = FakeRuntime.new
-    request(runtime, "POST", "/v1/sandboxes", "{}", "").status_code.should eq(401)
-    runtime.calls.should be_empty
+    request(runtime, "POST", "/v1/sandboxes", %({"image":"busybox","command":["sleep","infinity"]})).status_code.should eq(201)
+    runtime.calls.size.should eq(2)
   end
   it "creates and starts a sandbox with defaults and a generated ID" do
     runtime = FakeRuntime.new

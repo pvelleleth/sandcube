@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 
 
-def check_phase3(api, execute, base, token, sid, other, reconnect_api):
+def check_phase3(api, execute, base, sid, other, reconnect_api):
     prefix = f'/v1/sandboxes/{sid}'
 
     def file(method, path, data=None, content=True, expected=200, mode=None):
@@ -15,7 +15,7 @@ def check_phase3(api, execute, base, token, sid, other, reconnect_api):
         if mode is not None:
             url += '&mode=' + mode
         req = urllib.request.Request(url, data=data, method=method,
-            headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/octet-stream'})
+            headers={'Content-Type': 'application/octet-stream'})
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 status, result = r.status, r.read()

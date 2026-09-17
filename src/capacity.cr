@@ -11,7 +11,7 @@ module Sandcube
     end
 
     def configure(conn)
-      conn.exec("INSERT INTO host_capacity(cpu,memory_mb,disk_mb) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", @cpu, @memory_mb, @disk_mb)
+      conn.exec("INSERT INTO host_capacity(singleton,cpu,memory_mb,disk_mb) VALUES(1,?1,?2,?3) ON CONFLICT DO NOTHING", @cpu, @memory_mb, @disk_mb)
       saved = conn.query_one("SELECT cpu,memory_mb,disk_mb FROM host_capacity WHERE singleton", as: {Int64, Int64, Int64})
       raise ArgumentError.new("Capacity configuration differs from the host's persisted budgets") unless saved == {@cpu, @memory_mb, @disk_mb}
     end
@@ -19,11 +19,11 @@ module Sandcube
     # Called inside the host lock AND the intent transaction. Uncertain cleanup
     # retains its reservation; a process crash cannot make capacity disappear.
     def reserve(conn, id, cpu, memory, disk)
-      used = conn.query_one("SELECT COALESCE(sum(reserved_cpu),0)::bigint, COALESCE(sum(reserved_memory_mb),0)::bigint, COALESCE(sum(reserved_disk_mb),0)::bigint FROM sandboxes WHERE id!=$1", id, as: {Int64, Int64, Int64})
+      used = conn.query_one("SELECT COALESCE(sum(reserved_cpu),0), COALESCE(sum(reserved_memory_mb),0), COALESCE(sum(reserved_disk_mb),0) FROM sandboxes WHERE id!=?1", id, as: {Int64, Int64, Int64})
       if cpu > @cpu - used[0] || memory > @memory_mb - used[1] || disk > @disk_mb - used[2]
         raise ImageError.new(409, "INSUFFICIENT_CAPACITY", "Host CPU, memory or writable-storage capacity is exhausted")
       end
-      conn.exec("UPDATE sandboxes SET reserved_cpu=$2,reserved_memory_mb=$3,reserved_disk_mb=$4 WHERE id=$1", id, cpu, memory, disk)
+      conn.exec("UPDATE sandboxes SET reserved_cpu=?2,reserved_memory_mb=?3,reserved_disk_mb=?4 WHERE id=?1", id, cpu, memory, disk)
     end
   end
 end

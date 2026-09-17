@@ -7,3 +7,6 @@ bin/
 __pycache__/
 
 lib/
+dist/
+.sandcube-spec-*
+.cli-acceptance-*

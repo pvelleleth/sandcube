@@ -1,5 +1,31 @@
 # Runtime and image milestone verification
 
+## CLI and installation milestone
+
+The CLI suite covers config permissions and secret round trips, invalid input, exact XFS mount/quota checks, nonempty-storage rejection, binary payload checksums and corruption, symlink/path-traversal rejection, private daemon configuration, readiness deadlines, early process exit, unexpected crashes, reverse-order shutdown, SIGKILL escalation, real SIGINT/SIGTERM during startup, and occupied/stale sockets.
+
+`make test` also runs eight installer/release tests with real RSA signing, verification and hashing against a simulated host. These exercise amd64/arm64 selection, optional dependencies/systemd, bad signatures and artifact checksums, and release-script output. They do not install packages or modify the host. `make test-package` verifies the actual embedded bytes against both built executables and exercises commands from an unrelated directory without database configuration.
+
+Database specs run automatically against temporary SQLite files; no database service or credentials are required. They exercise lifecycle recovery, image reservations, TTL, admission races, and database close/reopen persistence. For real host acceptance, install runtime dependencies and use a disposable Linux host without an installed Sandcube systemd unit:
+
+```sh
+sudo -E make integration-cli
+```
+
+The harness uses the packaged CLI to provision a new 768 MiB XFS image and SQLite database, then checks doctor, readiness, duplicate-supervisor rejection, unauthenticated API calls, automatic image pulling, persistent sandbox execution, Ctrl-C shutdown/restart, adapter-crash propagation, SIGTERM shutdown, and managed remount. State and logs are retained under `.cli-acceptance-*` for inspection. Set `SANDCUBE_TEST_STORAGE` to an empty XFS/prjquota mount to exercise custom storage instead. Manual-process acceptance suites launch `bin/sandcube-api` with fresh temporary data directories.
+
+Verified on 2026-09-17: 81 Crystal examples passed using local SQLite, including close/reopen persistence, metadata access during runtime waits, and legacy-config rejection. Go race tests and vet passed. The packaged CLI acceptance passed with automatically provisioned storage and no API credentials or database URL. The real containerd/gVisor reliability suite passed all eight SIGKILL-before/after lifecycle cases, duplicate API rejection, concurrent idempotent creates, process-history/log recovery, file persistence, TTL, metrics and orphan cleanup. Installer and packaged-binary tests passed. Dependency installation across every supported distribution and static arm64 release execution remain release-environment checks.
+
+## Historical verification before the SQLite conversion
+
+The results and commands below describe earlier PostgreSQL-based versions, not current setup requirements.
+
+Verified locally on 2026-09-11: all 78 Crystal examples passed against an isolated local PostgreSQL database, with no pending examples; Go race tests and vet passed; all eight installer/release tests and both packaged-binary tests passed. Static amd64 Crystal launcher/API compilation and static Go adapter compilation were also exercised.
+
+The real packaged-CLI acceptance passed using a newly created disposable 1 GiB XFS image mounted with `prjquota`, a fresh local PostgreSQL database, containerd 2.2.3 and the host's gVisor release-20260622.0. This verified actual startup, sandbox execution, file persistence through supervisor restart, duplicate-start rejection, adapter-crash propagation, and SIGINT/SIGTERM shutdown. The temporary filesystem, database, role and runtime directory were removed afterward. Dependency package installation on each supported distro, execution with the installer's newer pinned gVisor release, arm64 execution, and publication with a production signing key remain release-environment checks.
+
+## Earlier runtime verification
+
 Verified on 2026-09-10 on the target Linux VPS using containerd 2.2.3, gVisor release-20260622.0, Crystal 1.19.1, Go 1.27.1, PostgreSQL 16.15 and BuildKit 0.33.0. Tests used the dedicated containerd instance configured by `infra/containerd/config.toml`.
 
 ## Commands

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Phase 4 real PostgreSQL/containerd/gVisor SIGKILL and lost-response tests.
-Requires a dedicated TEST_DATABASE_URL and empty sandcube-test namespace.
+"""Phase 4 real SQLite/containerd/gVisor SIGKILL and lost-response tests.
+Requires an empty sandcube-test namespace; creates temporary SQLite state.
 The Unix HTTP proxy injects faults without adding production fault switches.
 """
 import concurrent.futures
@@ -22,10 +22,8 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 ADDRESS = os.environ.get('SANDCUBE_CONTAINERD', '/run/sandcube-containerd/containerd.sock')
-DATABASE = os.environ['TEST_DATABASE_URL']
 IMAGE = 'docker.io/library/busybox:1.37.0'
 NS = 'sandcube-test'
-TOKEN = secrets.token_hex(32)
 children = []
 fault = None
 api_process = adapter = None
@@ -35,8 +33,6 @@ fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 def ctr(*args):
     return subprocess.run(['ctr', '--address', ADDRESS, '-n', NS, *args], capture_output=True, text=True, check=True).stdout
 
-def sql(query):
-    return subprocess.run(['psql', DATABASE, '-v', 'ON_ERROR_STOP=1', '-At'], input=query, text=True, capture_output=True, check=True).stdout.strip()
 
 def kill(p):
     if p and p.poll() is None:
@@ -92,7 +88,7 @@ class UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
 def api(method, path, body=None, key=None, expected=200, base_url=None):
-    headers = {'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'}
+    headers = {'Content-Type': 'application/json'}
     if key:
         headers['Idempotency-Key'] = key
     req = urllib.request.Request((base_url or base) + path, data=json.dumps(body).encode() if body is not None else None, method=method, headers=headers)
@@ -117,7 +113,9 @@ def restart():
     global api_process, adapter
     kill(api_process)
     kill(adapter)
-    adapter = launch('containerd-runtime', ['-socket', real_socket, '-containerd', ADDRESS, '-namespace', NS, '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml'), '-history-root', work + '/history'], env, log)
+    adapter = launch('containerd-runtime', ['-socket', real_socket, '-containerd', ADDRESS,
+        '-containerd-state', os.environ.get('SANDCUBE_CONTAINERD_STATE', str(Path(ADDRESS).parent)),
+        '-namespace', NS, '-runsc-config', str(ROOT / 'infra/gvisor/runsc.toml'), '-history-root', work + '/history'], env, log)
     for _ in range(100):
         try:
             c = UnixConnection('localhost'); c.request('GET', '/health'); r = c.getresponse(); r.read(); c.close()
@@ -126,7 +124,7 @@ def restart():
         except (OSError, http.client.HTTPException):
             pass
         time.sleep(.1)
-    api_process = launch('sandcube', [], env, log)
+    api_process = launch('sandcube-api', [], env, log)
     healthy()
 
 def eventually(fn):
@@ -137,15 +135,13 @@ def eventually(fn):
     raise AssertionError('eventual convergence failed')
 
 assert not ctr('containers', 'list', '-q').strip(), 'Use an empty dedicated test namespace'
-# Refuse to sweep someone else's records in a shared database.
-assert sql("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='sandboxes'") == '0' or sql("SELECT count(*) FROM sandboxes WHERE status!='deleted'") == '0', 'Use a dedicated test database'
 with tempfile.TemporaryDirectory(prefix='sc-p4-') as work:
     real_socket = work + '/runtime.sock'
     proxy_socket = work + '/proxy.sock'
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
-    env = dict(os.environ, DATABASE_URL=DATABASE, SANDCUBE_RUNTIME_SOCKET=proxy_socket, SANDCUBE_API_KEY=TOKEN, SANDCUBE_PORT=str(port), SANDCUBE_RECONCILE_SECONDS='1', SANDCUBE_CAPACITY_CPU='2', SANDCUBE_CAPACITY_MEMORY_MB='512', SANDCUBE_CAPACITY_DISK_MB='256')
+    env = dict(os.environ, SANDCUBE_DATA_DIR=work + '/data', SANDCUBE_RUNTIME_SOCKET=proxy_socket, SANDCUBE_PORT=str(port), SANDCUBE_RECONCILE_SECONDS='1', SANDCUBE_CAPACITY_CPU='2', SANDCUBE_CAPACITY_MEMORY_MB='512', SANDCUBE_CAPACITY_DISK_MB='256')
     proxy = UnixServer(proxy_socket, Proxy)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
     with open(work + '/services.log', 'w+') as log:
@@ -185,18 +181,12 @@ with tempfile.TemporaryDirectory(prefix='sc-p4-') as work:
             key = secrets.token_hex(12)
             with socket.socket() as probe:
                 probe.bind(('127.0.0.1', 0)); second_port = probe.getsockname()[1]
-            second_base = f'http://127.0.0.1:{second_port}'
-            second_api = launch('sandcube', [], dict(env, SANDCUBE_PORT=str(second_port), SANDCUBE_IMAGE_API_ENABLED='false'), log)
-            for _ in range(100):
-                try:
-                    api('GET', '/health', base_url=second_base)
-                    break
-                except (OSError, http.client.HTTPException):
-                    time.sleep(.1)
+            second_api = launch('sandcube-api', [], dict(env, SANDCUBE_PORT=str(second_port), SANDCUBE_IMAGE_API_ENABLED='false'), log)
+            assert second_api.wait(timeout=15) != 0, 'A second API must refuse the same data directory'
             with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-                rows = list(pool.map(lambda i: api('POST', '/v1/sandboxes', body, key, 201, second_base if i % 2 else base), range(6)))
-            kill(second_api)
+                rows = list(pool.map(lambda i: api('POST', '/v1/sandboxes', body, key, 201), range(6)))
             assert len({r['id'] for r in rows}) == 1
+            print('PASS: duplicate API refusal and concurrent idempotent creates', flush=True)
             sid = rows[0]['id']; prefix = '/v1/sandboxes/' + sid
             finished = api('POST', prefix + '/processes', {'command': ['/bin/sh', '-c', 'echo completed; echo err-completed >&2; exit 23']}, expected=202)
             eventually(lambda: api('GET', prefix + '/processes/' + finished['id'])['status'] == 'exited')
@@ -247,7 +237,7 @@ with tempfile.TemporaryDirectory(prefix='sc-p4-') as work:
                 if stopped:
                     api('POST', '/v1/sandboxes/' + sb['id'] + '/stop')
                 eventually(lambda: api('GET', '/v1/sandboxes/' + sb['id'])['status'] == 'deleted')
-            # Make a labelled orphan through the adapter, bypassing PostgreSQL.
+            # Make a labelled orphan through the adapter, bypassing SQLite.
             orphan = 'sbx_' + secrets.token_hex(16)
             c = UnixConnection('localhost');c.request('POST', '/containers', json.dumps(dict(id=orphan,image=IMAGE,command=['/bin/sleep','infinity'],cpu=1,memory_mb=256,pids=128)));r=c.getresponse();r.read();assert r.status==201;c.close()
             eventually(lambda: orphan not in ctr('containers','list','-q'))

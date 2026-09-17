@@ -1,6 +1,5 @@
 require "http/server"
 require "uuid"
-require "crypto/subtle"
 require "log"
 require "./runtime/runtime"
 require "./images/builder"
@@ -12,19 +11,13 @@ module Sandcube
     MAX_BODY = 64 * 1024
     @lifecycle_locks = Array(Mutex).new(256) { Mutex.new }
 
-    def initialize(@runtime : Runtime, @api_key : String, @images : ImageManager? = nil, @image_store : ImageStore? = nil, @reliability : Reliability? = nil)
-      raise ArgumentError.new("SANDCUBE_API_KEY must contain at least 32 bytes") if @api_key.bytesize < 32
+    def initialize(@runtime : Runtime, @images : ImageManager? = nil, @image_store : ImageStore? = nil, @reliability : Reliability? = nil)
     end
 
     def call(context : HTTP::Server::Context)
       started = Time.instant
       response = context.response
       response.content_type = "application/json"
-      expected = "Bearer #{@api_key}"
-      supplied = context.request.headers["Authorization"]? || ""
-      unless Crypto::Subtle.constant_time_compare(supplied, expected)
-        return error(context, 401, "UNAUTHORIZED", "A valid API key is required")
-      end
       method = context.request.method
       path = context.request.path
       if reliability = @reliability

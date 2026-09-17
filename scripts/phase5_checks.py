@@ -112,7 +112,7 @@ def check_phase5(g):
     assert not subprocess.run(['conntrack','-L','-f','ipv4','--orig-src',guest],capture_output=True,text=True,check=True).stdout.strip()
     # Write enough binary data through the public API to exceed remaining space.
     import urllib.request, urllib.error
-    req=urllib.request.Request(g['base']+f'/v1/sandboxes/{sid}/files/content?path=/api-fill',data=b'x'*(4<<20),method='PUT',headers={'Authorization':'Bearer '+g['TOKEN'],'Content-Type':'application/octet-stream'})
+    req=urllib.request.Request(g['base']+f'/v1/sandboxes/{sid}/files/content?path=/api-fill',data=b'x'*(4<<20),method='PUT',headers={'Content-Type':'application/octet-stream'})
     try:
         urllib.request.urlopen(req,timeout=30)
         raise AssertionError('stopped file API bypassed project quota')

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Phase 5 uses the Phase 4 real crash harness plus kernel/network checks.
-Requires TEST_DATABASE_URL and a dedicated SANDCUBE_CONTAINERD instance whose
+Requires a dedicated SANDCUBE_CONTAINERD instance whose
 snapshotter is on XFS/prjquota. See docs/resources-networking.md for setup.
 """
 import os
