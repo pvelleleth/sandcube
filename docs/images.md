@@ -16,7 +16,7 @@ sudo buildkitd --root /var/lib/sandcube-buildkit \
   --oci-worker-net bridge --containerd-worker=false --oci-max-parallelism 2
 ```
 
-An explicit CNI configuration alternative is in `infra/buildkit/`. Install the CNI configuration at `/etc/sandcube/buildkit-cni.json` and standard CNI plugins in `/opt/cni/bin` before using that TOML. Restrict build network access to sensitive host/private services with host firewall rules appropriate to the deployment. BuildKit build execution has its own OCI worker; sandbox execution continues to require gVisor.
+An explicit CNI configuration alternative is in `infra/buildkit/`. Install the CNI configuration at `/etc/sandcube/buildkit-cni.conflist` and standard CNI plugins in `/opt/cni/bin` before using that TOML. Restrict build network access to sensitive host/private services with host firewall rules appropriate to the deployment. BuildKit build execution has its own OCI worker; sandbox execution continues to require gVisor.
 
 API configuration:
 

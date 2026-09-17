@@ -189,7 +189,7 @@ module Sandcube::CLI
         enabled = true
         snapshotter = "overlayfs"
         networkMode = "cni"
-        cniConfigPath = #{File.join(config.run_dir, "buildkit-cni.json").to_json}
+        cniConfigPath = #{File.join(config.run_dir, "buildkit-cni.conflist").to_json}
         cniBinaryPath = "/opt/cni/bin"
       [worker.containerd]
         enabled = false
@@ -199,9 +199,10 @@ module Sandcube::CLI
     def self.write(config : Config)
       files = {"containerd.toml" => containerd(config), "runsc.toml" => {{ read_file("#{__DIR__}/../../infra/gvisor/runsc.toml") }}}
       files["buildkitd.toml"] = buildkit(config)
-      cni = JSON.parse({{ read_file("#{__DIR__}/../../infra/buildkit/buildkit-cni.json") }})
+      # BuildKit selects the plugin-list parser by the .conflist extension.
+      cni = JSON.parse({{ read_file("#{__DIR__}/../../infra/buildkit/buildkit-cni.conflist") }})
       cni["plugins"][0]["ipam"].as_h["dataDir"] = JSON::Any.new(File.join(config.data_dir, "cni"))
-      files["buildkit-cni.json"] = cni.to_json
+      files["buildkit-cni.conflist"] = cni.to_json
       files.each do |name, content|
         path = File.join(config.run_dir, name)
         raise "Refusing symlink: #{path}" if File.symlink?(path)

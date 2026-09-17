@@ -8,7 +8,7 @@ root = "/var/lib/sandcube-buildkit"
   enabled = true
   snapshotter = "overlayfs"
   networkMode = "cni"
-  cniConfigPath = "/etc/sandcube/buildkit-cni.json"
+  cniConfigPath = "/etc/sandcube/buildkit-cni.conflist"
   cniBinaryPath = "/opt/cni/bin"
 [worker.containerd]
   enabled = false

@@ -184,6 +184,21 @@ describe Sandcube::CLI::RuntimeConfig do
     toml.should contain("address = \"/run/sandcube/containerd.sock\"")
     Sandcube::CLI::RuntimeConfig.buildkit(config).should contain("networkMode = \"cni\"")
   end
+
+  it "writes a CNI plugin list with the extension required by BuildKit" do
+    with_cli_dir do |dir|
+      config = cli_config(File.join(dir, "data"))
+      config.values["SANDCUBE_RUN_DIR"] = dir
+      Sandcube::CLI::RuntimeConfig.write(config)
+
+      cni_path = File.join(dir, "buildkit-cni.conflist")
+      File.read(File.join(dir, "buildkitd.toml")).should contain("cniConfigPath = #{cni_path.to_json}")
+      cni = JSON.parse(File.read(cni_path))
+      cni["plugins"].as_a.map { |plugin| plugin["type"].as_s }.should eq(["bridge", "firewall"])
+      cni["plugins"][0]["ipam"]["dataDir"].as_s.should eq(File.join(config.data_dir, "cni"))
+      (File.info(cni_path).permissions.value & 0o777).should eq(0o600)
+    end
+  end
 end
 
 private def fixture_child(supervisor, name, dir, script = "")

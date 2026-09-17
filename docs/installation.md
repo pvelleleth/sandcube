@@ -49,7 +49,7 @@ The default layout is:
   runtime.sock
   containerd/                        # volatile containerd task state
   buildkitd.sock                     # optional
-  *.toml, buildkit-cni.json, serve.lock
+  *.toml, buildkit-cni.conflist, serve.lock
 ```
 
 The config has a stable default path so `serve` requires no arguments. `--config /absolute/path/config.env` places the managed image and data mount beside that file; pass the same option to subsequent commands. `--run-dir` chooses another private runtime directory. Network namespace handles remain in `/run/netns`; the adapter's network allocation lock remains `/run/sandcube-network.lock`.
