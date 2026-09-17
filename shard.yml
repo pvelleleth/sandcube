@@ -1,5 +1,5 @@
 name: sandcube
-version: 0.1.0
+version: 0.1.1
 crystal: '>= 1.19.0'
 license: MIT
 targets:

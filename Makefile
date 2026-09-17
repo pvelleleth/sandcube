@@ -1,6 +1,6 @@
 GO ?= go
 CRYSTAL ?= crystal
-VERSION ?= 0.1.0
+VERSION ?= 0.1.1
 CRYSTAL_FLAGS ?= --threads 1
 export CRYSTAL_CACHE_DIR ?= /tmp/sandcube-crystal
 export GOPATH ?= /tmp/sandcube-gopath
